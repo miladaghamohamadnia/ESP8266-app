@@ -1,0 +1,25 @@
+{
+  "name": "esp_app",
+  "version": "1.0.0",
+  "description": "This is an app for ESP8266 data visualization feeded in via MQTT protocol and visualized via NodeJS, AngualarJS, Gulp, Browserify and Firebase Database. ",
+  "main": "main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Milad Aghamohamadnia",
+  "license": "ISC",
+  "devDependencies": {
+    "browserify": "^13.0.1",
+    "gulp": "^3.9.1",
+    "gulp-connect": "^4.1.0",
+    "gulp-ruby-sass": "^2.0.6",
+    "vinyl-source-stream": "^1.1.0"
+  },
+  "dependencies": {
+    "angular": "^1.5.7",
+    "d3-browserify": "^3.4.12",
+    "moment": "^2.14.1",
+    "moment-timezone": "^0.5.4",
+    "mqtt": "^1.12.0"
+  }
+}
