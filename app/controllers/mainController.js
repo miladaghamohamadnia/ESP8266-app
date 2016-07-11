@@ -3,16 +3,20 @@ var mqtt = require('mqtt');
 var d3 = require('d3-browserify')
 var moment = require('moment');
 require('moment-timezone');
+require('angularfire');
+require('client-firebase');
 
-module.exports = function($scope, $timeout) {
+
+module.exports = function($scope, $firebaseArray, $timeout) {
+	var ref = new Firebase("https://esp001-864dd.firebaseio.com/first_try");
 	var broker = 'mqtt://a955900d:ade60d7ea25819d9@broker.shiftr.io';
 	var client = mqtt.connect(broker);
-	client.subscribe('data/');
+	client.subscribe('esp001data/');
 
 	var line;
 	var xAxis;
 	var yAxisLeft;
-	var N = 20;
+	var N = 200;
 	var data = {time:new Array(N), value:new Array(N)};
 	
 	once_init()
@@ -105,6 +109,9 @@ module.exports = function($scope, $timeout) {
 		data.time.shift();
 	    data.value.push(parseInt(packet.payload));
 	    data.value.shift();
+	    //Firebase Update
+	    // console.log('Firebase Update');
+	    ref.push({ 'timestamp':date_ , 'value': parseInt(packet.payload) });
 	    // console.log(data.value);
 	    times_ext = d3.extent(data.time, function(el) {
 	    	return el;
@@ -152,12 +159,17 @@ module.exports = function($scope, $timeout) {
   function on_post_added(packet) {
   	$timeout(function(){
   		updateData(packet)
+  		ref
   	},0);
   };
   //-----------------------------------------------------------------------
   function once_init() {
   	$timeout(function(){
   		console.log("controller loaded ...");
+  		// Firebase database cleaning
+  		ref.remove();
+  		console.log("firebase cleaned ...");
+  		// D3 process begins
   		initData();
   	},0);
   };

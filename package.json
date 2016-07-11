@@ -17,7 +17,12 @@
   },
   "dependencies": {
     "angular": "^1.5.7",
+    "angularfire": "^2.0.1",
+    "angularfire-browserify": "0.0.1",
+    "client-firebase": "^1.0.1",
     "d3-browserify": "^3.4.12",
+    "firebase": "^2.4.2",
+    "jquery": "^3.1.0",
     "moment": "^2.14.1",
     "moment-timezone": "^0.5.4",
     "mqtt": "^1.12.0"

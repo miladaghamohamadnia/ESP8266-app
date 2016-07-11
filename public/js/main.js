@@ -1,26 +1,35 @@
 (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
 require('angular');
 var mainController = require('./controllers/mainController');
+// require('angularfire-browserify');
+require('jquery');
+require('angularfire');
+require('client-firebase');
 
-var app = angular.module('app', []);
-app.controller('mainController', ['$scope', '$timeout', mainController])
 
-},{"./controllers/mainController":2,"angular":4}],2:[function(require,module,exports){
+var app = angular.module('app', ['firebase']);
+app.controller('mainController', ['$scope', '$firebaseArray', '$timeout', mainController])
+
+},{"./controllers/mainController":2,"angular":4,"angularfire":6,"client-firebase":19,"jquery":36}],2:[function(require,module,exports){
 // var MQTT = require('../lib/MQTTreader');
 var mqtt = require('mqtt');
 var d3 = require('d3-browserify')
 var moment = require('moment');
 require('moment-timezone');
+require('angularfire');
+require('client-firebase');
 
-module.exports = function($scope, $timeout) {
+
+module.exports = function($scope, $firebaseArray, $timeout) {
+	var ref = new Firebase("https://esp001-864dd.firebaseio.com/first_try");
 	var broker = 'mqtt://a955900d:ade60d7ea25819d9@broker.shiftr.io';
 	var client = mqtt.connect(broker);
-	client.subscribe('data/');
+	client.subscribe('esp001data/');
 
 	var line;
 	var xAxis;
 	var yAxisLeft;
-	var N = 20;
+	var N = 200;
 	var data = {time:new Array(N), value:new Array(N)};
 	
 	once_init()
@@ -113,6 +122,9 @@ module.exports = function($scope, $timeout) {
 		data.time.shift();
 	    data.value.push(parseInt(packet.payload));
 	    data.value.shift();
+	    //Firebase Update
+	    // console.log('Firebase Update');
+	    ref.push({ 'timestamp':date_ , 'value': parseInt(packet.payload) });
 	    // console.log(data.value);
 	    times_ext = d3.extent(data.time, function(el) {
 	    	return el;
@@ -160,12 +172,17 @@ module.exports = function($scope, $timeout) {
   function on_post_added(packet) {
   	$timeout(function(){
   		updateData(packet)
+  		ref
   	},0);
   };
   //-----------------------------------------------------------------------
   function once_init() {
   	$timeout(function(){
   		console.log("controller loaded ...");
+  		// Firebase database cleaning
+  		ref.remove();
+  		console.log("firebase cleaned ...");
+  		// D3 process begins
   		initData();
   	},0);
   };
@@ -177,7 +194,7 @@ module.exports = function($scope, $timeout) {
 
 };
 
-},{"d3-browserify":16,"moment":34,"moment-timezone":32,"mqtt":41}],3:[function(require,module,exports){
+},{"angularfire":6,"client-firebase":19,"d3-browserify":21,"moment":40,"moment-timezone":38,"mqtt":47}],3:[function(require,module,exports){
 /**
  * @license AngularJS v1.5.7
  * (c) 2010-2016 Google, Inc. http://angularjs.org
@@ -31656,6 +31673,2856 @@ require('./angular');
 module.exports = angular;
 
 },{"./angular":3}],5:[function(require,module,exports){
+/*!
+ * AngularFire is the officially supported AngularJS binding for Firebase. Firebase
+ * is a full backend so you don't need servers to build your Angular app. AngularFire
+ * provides you with the $firebase service which allows you to easily keep your $scope
+ * variables in sync with your Firebase backend.
+ *
+ * AngularFire 2.0.1
+ * https://github.com/firebase/angularfire/
+ * Date: 06/02/2016
+ * License: MIT
+ */
+(function(exports) {
+  "use strict";
+
+// Define the `firebase` module under which all AngularFire
+// services will live.
+  angular.module("firebase", [])
+    //todo use $window
+    .value("Firebase", exports.Firebase);
+
+})(window);
+(function() {
+  'use strict';
+  /**
+   * Creates and maintains a synchronized list of data. This is a pseudo-read-only array. One should
+   * not call splice(), push(), pop(), et al directly on this array, but should instead use the
+   * $remove and $add methods.
+   *
+   * It is acceptable to .sort() this array, but it is important to use this in conjunction with
+   * $watch(), so that it will be re-sorted any time the server data changes. Examples of this are
+   * included in the $watch documentation.
+   *
+   * Internally, the $firebase object depends on this class to provide several $$ (i.e. protected)
+   * methods, which it invokes to notify the array whenever a change has been made at the server:
+   *    $$added - called whenever a child_added event occurs
+   *    $$updated - called whenever a child_changed event occurs
+   *    $$moved - called whenever a child_moved event occurs
+   *    $$removed - called whenever a child_removed event occurs
+   *    $$error - called when listeners are canceled due to a security error
+   *    $$process - called immediately after $$added/$$updated/$$moved/$$removed
+   *                (assuming that these methods do not abort by returning false or null)
+   *                to splice/manipulate the array and invoke $$notify
+   *
+   * Additionally, these methods may be of interest to devs extending this class:
+   *    $$notify - triggers notifications to any $watch listeners, called by $$process
+   *    $$getKey - determines how to look up a record's key (returns $id by default)
+   *
+   * Instead of directly modifying this class, one should generally use the $extend
+   * method to add or change how methods behave. $extend modifies the prototype of
+   * the array class by returning a clone of $firebaseArray.
+   *
+   * <pre><code>
+   * var ExtendedArray = $firebaseArray.$extend({
+   *    // add a new method to the prototype
+   *    foo: function() { return 'bar'; },
+   *
+   *    // change how records are created
+   *    $$added: function(snap, prevChild) {
+   *       return new Widget(snap, prevChild);
+   *    },
+   *
+   *    // change how records are updated
+   *    $$updated: function(snap) {
+   *      return this.$getRecord(snap.key()).update(snap);
+   *    }
+   * });
+   *
+   * var list = new ExtendedArray(ref);
+   * </code></pre>
+   */
+  angular.module('firebase').factory('$firebaseArray', ["$log", "$firebaseUtils", "$q",
+    function($log, $firebaseUtils, $q) {
+      /**
+       * This constructor should probably never be called manually. It is used internally by
+       * <code>$firebase.$asArray()</code>.
+       *
+       * @param {Firebase} ref
+       * @returns {Array}
+       * @constructor
+       */
+      function FirebaseArray(ref) {
+        if( !(this instanceof FirebaseArray) ) {
+          return new FirebaseArray(ref);
+        }
+        var self = this;
+        this._observers = [];
+        this.$list = [];
+        this._ref = ref;
+        this._sync = new ArraySyncManager(this);
+
+        $firebaseUtils.assertValidRef(ref, 'Must pass a valid Firebase reference ' +
+        'to $firebaseArray (not a string or URL)');
+
+        // indexCache is a weak hashmap (a lazy list) of keys to array indices,
+        // items are not guaranteed to stay up to date in this list (since the data
+        // array can be manually edited without calling the $ methods) and it should
+        // always be used with skepticism regarding whether it is accurate
+        // (see $indexFor() below for proper usage)
+        this._indexCache = {};
+
+        // Array.isArray will not work on objects which extend the Array class.
+        // So instead of extending the Array class, we just return an actual array.
+        // However, it's still possible to extend FirebaseArray and have the public methods
+        // appear on the array object. We do this by iterating the prototype and binding
+        // any method that is not prefixed with an underscore onto the final array.
+        $firebaseUtils.getPublicMethods(self, function(fn, key) {
+          self.$list[key] = fn.bind(self);
+        });
+
+        this._sync.init(this.$list);
+
+        return this.$list;
+      }
+
+      FirebaseArray.prototype = {
+        /**
+         * Create a new record with a unique ID and add it to the end of the array.
+         * This should be used instead of Array.prototype.push, since those changes will not be
+         * synchronized with the server.
+         *
+         * Any value, including a primitive, can be added in this way. Note that when the record
+         * is created, the primitive value would be stored in $value (records are always objects
+         * by default).
+         *
+         * Returns a future which is resolved when the data has successfully saved to the server.
+         * The resolve callback will be passed a Firebase ref representing the new data element.
+         *
+         * @param data
+         * @returns a promise resolved after data is added
+         */
+        $add: function(data) {
+          this._assertNotDestroyed('$add');
+          var self = this;
+          var def = $q.defer();
+          var ref = this.$ref().ref.push();
+          var dataJSON;
+
+          try {
+            dataJSON = $firebaseUtils.toJSON(data);
+          } catch (err) {
+            def.reject(err);
+          }
+
+          if (typeof dataJSON !== 'undefined') {
+            $firebaseUtils.doSet(ref, dataJSON).then(function() {
+              self.$$notify('child_added', ref.key);
+              def.resolve(ref);
+            }).catch(def.reject);
+          }
+
+          return def.promise;
+        },
+
+        /**
+         * Pass either an item in the array or the index of an item and it will be saved back
+         * to Firebase. While the array is read-only and its structure should not be changed,
+         * it is okay to modify properties on the objects it contains and then save those back
+         * individually.
+         *
+         * Returns a future which is resolved when the data has successfully saved to the server.
+         * The resolve callback will be passed a Firebase ref representing the saved element.
+         * If passed an invalid index or an object which is not a record in this array,
+         * the promise will be rejected.
+         *
+         * @param {int|object} indexOrItem
+         * @returns a promise resolved after data is saved
+         */
+        $save: function(indexOrItem) {
+          this._assertNotDestroyed('$save');
+          var self = this;
+          var item = self._resolveItem(indexOrItem);
+          var key = self.$keyAt(item);
+          var def = $q.defer();
+
+          if( key !== null ) {
+            var ref = self.$ref().ref.child(key);
+            var dataJSON;
+
+            try {
+              dataJSON = $firebaseUtils.toJSON(item);
+            } catch (err) {
+              def.reject(err);
+            }
+
+            if (typeof dataJSON !== 'undefined') {
+              $firebaseUtils.doSet(ref, dataJSON).then(function() {
+                self.$$notify('child_changed', key);
+                def.resolve(ref);
+              }).catch(def.reject);
+            }
+          }
+          else {
+            def.reject('Invalid record; could not determine key for '+indexOrItem);
+          }
+
+          return def.promise;
+        },
+
+        /**
+         * Pass either an existing item in this array or the index of that item and it will
+         * be removed both locally and in Firebase. This should be used in place of
+         * Array.prototype.splice for removing items out of the array, as calling splice
+         * will not update the value on the server.
+         *
+         * Returns a future which is resolved when the data has successfully removed from the
+         * server. The resolve callback will be passed a Firebase ref representing the deleted
+         * element. If passed an invalid index or an object which is not a record in this array,
+         * the promise will be rejected.
+         *
+         * @param {int|object} indexOrItem
+         * @returns a promise which resolves after data is removed
+         */
+        $remove: function(indexOrItem) {
+          this._assertNotDestroyed('$remove');
+          var key = this.$keyAt(indexOrItem);
+          if( key !== null ) {
+            var ref = this.$ref().ref.child(key);
+            return $firebaseUtils.doRemove(ref).then(function() {
+              return ref;
+            });
+          }
+          else {
+            return $q.reject('Invalid record; could not determine key for '+indexOrItem);
+          }
+        },
+
+        /**
+         * Given an item in this array or the index of an item in the array, this returns the
+         * Firebase key (record.$id) for that record. If passed an invalid key or an item which
+         * does not exist in this array, it will return null.
+         *
+         * @param {int|object} indexOrItem
+         * @returns {null|string}
+         */
+        $keyAt: function(indexOrItem) {
+          var item = this._resolveItem(indexOrItem);
+          return this.$$getKey(item);
+        },
+
+        /**
+         * The inverse of $keyAt, this method takes a Firebase key (record.$id) and returns the
+         * index in the array where that record is stored. If the record is not in the array,
+         * this method returns -1.
+         *
+         * @param {String} key
+         * @returns {int} -1 if not found
+         */
+        $indexFor: function(key) {
+          var self = this;
+          var cache = self._indexCache;
+          // evaluate whether our key is cached and, if so, whether it is up to date
+          if( !cache.hasOwnProperty(key) || self.$keyAt(cache[key]) !== key ) {
+            // update the hashmap
+            var pos = self.$list.findIndex(function(rec) { return self.$$getKey(rec) === key; });
+            if( pos !== -1 ) {
+              cache[key] = pos;
+            }
+          }
+          return cache.hasOwnProperty(key)? cache[key] : -1;
+        },
+
+        /**
+         * The loaded method is invoked after the initial batch of data arrives from the server.
+         * When this resolves, all data which existed prior to calling $asArray() is now cached
+         * locally in the array.
+         *
+         * As a shortcut is also possible to pass resolve/reject methods directly into this
+         * method just as they would be passed to .then()
+         *
+         * @param {Function} [resolve]
+         * @param {Function} [reject]
+         * @returns a promise
+         */
+        $loaded: function(resolve, reject) {
+          var promise = this._sync.ready();
+          if( arguments.length ) {
+            // allow this method to be called just like .then
+            // by passing any arguments on to .then
+            promise = promise.then.call(promise, resolve, reject);
+          }
+          return promise;
+        },
+
+        /**
+         * @returns {Firebase} the original Firebase ref used to create this object.
+         */
+        $ref: function() { return this._ref; },
+
+        /**
+         * Listeners passed into this method are notified whenever a new change (add, updated,
+         * move, remove) is received from the server. Each invocation is sent an object
+         * containing <code>{ type: 'child_added|child_updated|child_moved|child_removed',
+         * key: 'key_of_item_affected'}</code>
+         *
+         * Additionally, added and moved events receive a prevChild parameter, containing the
+         * key of the item before this one in the array.
+         *
+         * This method returns a function which can be invoked to stop observing events.
+         *
+         * @param {Function} cb
+         * @param {Object} [context]
+         * @returns {Function} used to stop observing
+         */
+        $watch: function(cb, context) {
+          var list = this._observers;
+          list.push([cb, context]);
+          // an off function for cancelling the listener
+          return function() {
+            var i = list.findIndex(function(parts) {
+              return parts[0] === cb && parts[1] === context;
+            });
+            if( i > -1 ) {
+              list.splice(i, 1);
+            }
+          };
+        },
+
+        /**
+         * Informs $firebase to stop sending events and clears memory being used
+         * by this array (delete's its local content).
+         */
+        $destroy: function(err) {
+          if( !this._isDestroyed ) {
+            this._isDestroyed = true;
+            this._sync.destroy(err);
+            this.$list.length = 0;
+          }
+        },
+
+        /**
+         * Returns the record for a given Firebase key (record.$id). If the record is not found
+         * then returns null.
+         *
+         * @param {string} key
+         * @returns {Object|null} a record in this array
+         */
+        $getRecord: function(key) {
+          var i = this.$indexFor(key);
+          return i > -1? this.$list[i] : null;
+        },
+
+        /**
+         * Called to inform the array when a new item has been added at the server.
+         * This method should return the record (an object) that will be passed into $$process
+         * along with the add event. Alternately, the record will be skipped if this method returns
+         * a falsey value.
+         *
+         * @param {object} snap a Firebase snapshot
+         * @param {string} prevChild
+         * @return {object} the record to be inserted into the array
+         * @protected
+         */
+        $$added: function(snap/*, prevChild*/) {
+          // check to make sure record does not exist
+          var i = this.$indexFor(snap.key);
+          if( i === -1 ) {
+            // parse data and create record
+            var rec = snap.val();
+            if( !angular.isObject(rec) ) {
+              rec = { $value: rec };
+            }
+            rec.$id = snap.key;
+            rec.$priority = snap.getPriority();
+            $firebaseUtils.applyDefaults(rec, this.$$defaults);
+
+            return rec;
+          }
+          return false;
+        },
+
+        /**
+         * Called whenever an item is removed at the server.
+         * This method does not physically remove the objects, but instead
+         * returns a boolean indicating whether it should be removed (and
+         * taking any other desired actions before the remove completes).
+         *
+         * @param {object} snap a Firebase snapshot
+         * @return {boolean} true if item should be removed
+         * @protected
+         */
+        $$removed: function(snap) {
+          return this.$indexFor(snap.key) > -1;
+        },
+
+        /**
+         * Called whenever an item is changed at the server.
+         * This method should apply the changes, including changes to data
+         * and to $priority, and then return true if any changes were made.
+         *
+         * If this method returns false, then $$process will not be invoked,
+         * which means that $$notify will not take place and no $watch events
+         * will be triggered.
+         *
+         * @param {object} snap a Firebase snapshot
+         * @return {boolean} true if any data changed
+         * @protected
+         */
+        $$updated: function(snap) {
+          var changed = false;
+          var rec = this.$getRecord(snap.key);
+          if( angular.isObject(rec) ) {
+            // apply changes to the record
+            changed = $firebaseUtils.updateRec(rec, snap);
+            $firebaseUtils.applyDefaults(rec, this.$$defaults);
+          }
+          return changed;
+        },
+
+        /**
+         * Called whenever an item changes order (moves) on the server.
+         * This method should set $priority to the updated value and return true if
+         * the record should actually be moved. It should not actually apply the move
+         * operation.
+         *
+         * If this method returns false, then the record will not be moved in the array
+         * and no $watch listeners will be notified. (When true, $$process is invoked
+         * which invokes $$notify)
+         *
+         * @param {object} snap a Firebase snapshot
+         * @param {string} prevChild
+         * @protected
+         */
+        $$moved: function(snap/*, prevChild*/) {
+          var rec = this.$getRecord(snap.key);
+          if( angular.isObject(rec) ) {
+            rec.$priority = snap.getPriority();
+            return true;
+          }
+          return false;
+        },
+
+        /**
+         * Called whenever a security error or other problem causes the listeners to become
+         * invalid. This is generally an unrecoverable error.
+         *
+         * @param {Object} err which will have a `code` property and possibly a `message`
+         * @protected
+         */
+        $$error: function(err) {
+          $log.error(err);
+          this.$destroy(err);
+        },
+
+        /**
+         * Returns ID for a given record
+         * @param {object} rec
+         * @returns {string||null}
+         * @protected
+         */
+        $$getKey: function(rec) {
+          return angular.isObject(rec)? rec.$id : null;
+        },
+
+        /**
+         * Handles placement of recs in the array, sending notifications,
+         * and other internals. Called by the synchronization process
+         * after $$added, $$updated, $$moved, and $$removed return a truthy value.
+         *
+         * @param {string} event one of child_added, child_removed, child_moved, or child_changed
+         * @param {object} rec
+         * @param {string} [prevChild]
+         * @protected
+         */
+        $$process: function(event, rec, prevChild) {
+          var key = this.$$getKey(rec);
+          var changed = false;
+          var curPos;
+          switch(event) {
+            case 'child_added':
+              curPos = this.$indexFor(key);
+              break;
+            case 'child_moved':
+              curPos = this.$indexFor(key);
+              this._spliceOut(key);
+              break;
+            case 'child_removed':
+              // remove record from the array
+              changed = this._spliceOut(key) !== null;
+              break;
+            case 'child_changed':
+              changed = true;
+              break;
+            default:
+              throw new Error('Invalid event type: ' + event);
+          }
+          if( angular.isDefined(curPos) ) {
+            // add it to the array
+            changed = this._addAfter(rec, prevChild) !== curPos;
+          }
+          if( changed ) {
+            // send notifications to anybody monitoring $watch
+            this.$$notify(event, key, prevChild);
+          }
+          return changed;
+        },
+
+        /**
+         * Used to trigger notifications for listeners registered using $watch. This method is
+         * typically invoked internally by the $$process method.
+         *
+         * @param {string} event
+         * @param {string} key
+         * @param {string} [prevChild]
+         * @protected
+         */
+        $$notify: function(event, key, prevChild) {
+          var eventData = {event: event, key: key};
+          if( angular.isDefined(prevChild) ) {
+            eventData.prevChild = prevChild;
+          }
+          angular.forEach(this._observers, function(parts) {
+            parts[0].call(parts[1], eventData);
+          });
+        },
+
+        /**
+         * Used to insert a new record into the array at a specific position. If prevChild is
+         * null, is inserted first, if prevChild is not found, it is inserted last, otherwise,
+         * it goes immediately after prevChild.
+         *
+         * @param {object} rec
+         * @param {string|null} prevChild
+         * @private
+         */
+        _addAfter: function(rec, prevChild) {
+          var i;
+          if( prevChild === null ) {
+            i = 0;
+          }
+          else {
+            i = this.$indexFor(prevChild)+1;
+            if( i === 0 ) { i = this.$list.length; }
+          }
+          this.$list.splice(i, 0, rec);
+          this._indexCache[this.$$getKey(rec)] = i;
+          return i;
+        },
+
+        /**
+         * Removes a record from the array by calling splice. If the item is found
+         * this method returns it. Otherwise, this method returns null.
+         *
+         * @param {string} key
+         * @returns {object|null}
+         * @private
+         */
+        _spliceOut: function(key) {
+          var i = this.$indexFor(key);
+          if( i > -1 ) {
+            delete this._indexCache[key];
+            return this.$list.splice(i, 1)[0];
+          }
+          return null;
+        },
+
+        /**
+         * Resolves a variable which may contain an integer or an item that exists in this array.
+         * Returns the item or null if it does not exist.
+         *
+         * @param indexOrItem
+         * @returns {*}
+         * @private
+         */
+        _resolveItem: function(indexOrItem) {
+          var list = this.$list;
+          if( angular.isNumber(indexOrItem) && indexOrItem >= 0 && list.length >= indexOrItem ) {
+            return list[indexOrItem];
+          }
+          else if( angular.isObject(indexOrItem) ) {
+            // it must be an item in this array; it's not sufficient for it just to have
+            // a $id or even a $id that is in the array, it must be an actual record
+            // the fastest way to determine this is to use $getRecord (to avoid iterating all recs)
+            // and compare the two
+            var key = this.$$getKey(indexOrItem);
+            var rec = this.$getRecord(key);
+            return rec === indexOrItem? rec : null;
+          }
+          return null;
+        },
+
+        /**
+         * Throws an error if $destroy has been called. Should be used for any function
+         * which tries to write data back to $firebase.
+         * @param {string} method
+         * @private
+         */
+        _assertNotDestroyed: function(method) {
+          if( this._isDestroyed ) {
+            throw new Error('Cannot call ' + method + ' method on a destroyed $firebaseArray object');
+          }
+        }
+      };
+
+      /**
+       * This method allows FirebaseArray to be inherited by child classes. Methods passed into this
+       * function will be added onto the array's prototype. They can override existing methods as
+       * well.
+       *
+       * In addition to passing additional methods, it is also possible to pass in a class function.
+       * The prototype on that class function will be preserved, and it will inherit from
+       * FirebaseArray. It's also possible to do both, passing a class to inherit and additional
+       * methods to add onto the prototype.
+       *
+       *  <pre><code>
+       * var ExtendedArray = $firebaseArray.$extend({
+       *    // add a method onto the prototype that sums all items in the array
+       *    getSum: function() {
+       *       var ct = 0;
+       *       angular.forEach(this.$list, function(rec) { ct += rec.x; });
+        *      return ct;
+       *    }
+       * });
+       *
+       * // use our new factory in place of $firebaseArray
+       * var list = new ExtendedArray(ref);
+       * </code></pre>
+       *
+       * @param {Function} [ChildClass] a child class which should inherit FirebaseArray
+       * @param {Object} [methods] a list of functions to add onto the prototype
+       * @returns {Function} a child class suitable for use with $firebase (this will be ChildClass if provided)
+       * @static
+       */
+      FirebaseArray.$extend = function(ChildClass, methods) {
+        if( arguments.length === 1 && angular.isObject(ChildClass) ) {
+          methods = ChildClass;
+          ChildClass = function(ref) {
+            if( !(this instanceof ChildClass) ) {
+              return new ChildClass(ref);
+            }
+            FirebaseArray.apply(this, arguments);
+            return this.$list;
+          };
+        }
+        return $firebaseUtils.inherit(ChildClass, FirebaseArray, methods);
+      };
+
+      function ArraySyncManager(firebaseArray) {
+        function destroy(err) {
+          if( !sync.isDestroyed ) {
+            sync.isDestroyed = true;
+            var ref = firebaseArray.$ref();
+            ref.off('child_added', created);
+            ref.off('child_moved', moved);
+            ref.off('child_changed', updated);
+            ref.off('child_removed', removed);
+            firebaseArray = null;
+            initComplete(err||'destroyed');
+          }
+        }
+
+        function init($list) {
+          var ref = firebaseArray.$ref();
+
+          // listen for changes at the Firebase instance
+          ref.on('child_added', created, error);
+          ref.on('child_moved', moved, error);
+          ref.on('child_changed', updated, error);
+          ref.on('child_removed', removed, error);
+
+          // determine when initial load is completed
+          ref.once('value', function(snap) {
+            if (angular.isArray(snap.val())) {
+              $log.warn('Storing data using array indices in Firebase can result in unexpected behavior. See https://firebase.google.com/docs/database/web/structure-data for more information.');
+            }
+
+            initComplete(null, $list);
+          }, initComplete);
+        }
+
+        // call initComplete(), do not call this directly
+        function _initComplete(err, result) {
+          if( !isResolved ) {
+            isResolved = true;
+            if( err ) { def.reject(err); }
+            else { def.resolve(result); }
+          }
+        }
+
+        var def = $q.defer();
+        var created = function(snap, prevChild) {
+          if (!firebaseArray) {
+            return;
+          }
+          waitForResolution(firebaseArray.$$added(snap, prevChild), function(rec) {
+            firebaseArray.$$process('child_added', rec, prevChild);
+          });
+        };
+        var updated = function(snap) {
+          if (!firebaseArray) {
+            return;
+          }
+          var rec = firebaseArray.$getRecord(snap.key);
+          if( rec ) {
+            waitForResolution(firebaseArray.$$updated(snap), function() {
+              firebaseArray.$$process('child_changed', rec);
+            });
+          }
+        };
+        var moved   = function(snap, prevChild) {
+          if (!firebaseArray) {
+            return;
+          }
+          var rec = firebaseArray.$getRecord(snap.key);
+          if( rec ) {
+            waitForResolution(firebaseArray.$$moved(snap, prevChild), function() {
+              firebaseArray.$$process('child_moved', rec, prevChild);
+            });
+          }
+        };
+        var removed = function(snap) {
+          if (!firebaseArray) {
+            return;
+          }
+          var rec = firebaseArray.$getRecord(snap.key);
+          if( rec ) {
+            waitForResolution(firebaseArray.$$removed(snap), function() {
+               firebaseArray.$$process('child_removed', rec);
+            });
+          }
+        };
+
+        function waitForResolution(maybePromise, callback) {
+          var promise = $q.when(maybePromise);
+          promise.then(function(result){
+            if (result) {
+              callback(result);
+            }
+          });
+          if (!isResolved) {
+            resolutionPromises.push(promise);
+          }
+        }
+
+        var resolutionPromises = [];
+        var isResolved = false;
+        var error   = $firebaseUtils.batch(function(err) {
+          _initComplete(err);
+          if( firebaseArray ) {
+            firebaseArray.$$error(err);
+          }
+        });
+        var initComplete = $firebaseUtils.batch(_initComplete);
+
+        var sync = {
+          destroy: destroy,
+          isDestroyed: false,
+          init: init,
+          ready: function() { return def.promise.then(function(result){
+            return $q.all(resolutionPromises).then(function(){
+              return result;
+            });
+          }); }
+        };
+
+        return sync;
+      }
+
+      return FirebaseArray;
+    }
+  ]);
+
+  /** @deprecated */
+  angular.module('firebase').factory('$FirebaseArray', ['$log', '$firebaseArray',
+    function($log, $firebaseArray) {
+      return function() {
+        $log.warn('$FirebaseArray has been renamed. Use $firebaseArray instead.');
+        return $firebaseArray.apply(null, arguments);
+      };
+    }
+  ]);
+})();
+
+(function() {
+  'use strict';
+  var FirebaseAuth;
+
+  // Define a service which provides user authentication and management.
+  angular.module('firebase').factory('$firebaseAuth', [
+    '$q', '$firebaseUtils', function($q, $firebaseUtils) {
+      /**
+       * This factory returns an object allowing you to manage the client's authentication state.
+       *
+       * @param {Firebase.auth.Auth} auth A Firebase auth instance to authenticate.
+       * @return {object} An object containing methods for authenticating clients, retrieving
+       * authentication state, and managing users.
+       */
+      return function(auth) {
+        auth = auth || firebase.auth();
+
+        var firebaseAuth = new FirebaseAuth($q, $firebaseUtils, auth);
+        return firebaseAuth.construct();
+      };
+    }
+  ]);
+
+  FirebaseAuth = function($q, $firebaseUtils, auth) {
+    this._q = $q;
+    this._utils = $firebaseUtils;
+
+    if (typeof auth === 'string') {
+      throw new Error('The $firebaseAuth service accepts a Firebase auth instance (or nothing) instead of a URL.');
+    } else if (typeof auth.ref !== 'undefined') {
+      throw new Error('The $firebaseAuth service accepts a Firebase auth instance (or nothing) instead of a Database reference.');
+    }
+
+    this._auth = auth;
+    this._initialAuthResolver = this._initAuthResolver();
+  };
+
+  FirebaseAuth.prototype = {
+    construct: function() {
+      this._object = {
+        // Authentication methods
+        $signInWithCustomToken: this.signInWithCustomToken.bind(this),
+        $signInAnonymously: this.signInAnonymously.bind(this),
+        $signInWithEmailAndPassword: this.signInWithEmailAndPassword.bind(this),
+        $signInWithPopup: this.signInWithPopup.bind(this),
+        $signInWithRedirect: this.signInWithRedirect.bind(this),
+        $signInWithCredential: this.signInWithCredential.bind(this),
+        $signOut: this.signOut.bind(this),
+
+        // Authentication state methods
+        $onAuthStateChanged: this.onAuthStateChanged.bind(this),
+        $getAuth: this.getAuth.bind(this),
+        $requireSignIn: this.requireSignIn.bind(this),
+        $waitForSignIn: this.waitForSignIn.bind(this),
+
+        // User management methods
+        $createUserWithEmailAndPassword: this.createUserWithEmailAndPassword.bind(this),
+        $updatePassword: this.updatePassword.bind(this),
+        $updateEmail: this.updateEmail.bind(this),
+        $deleteUser: this.deleteUser.bind(this),
+        $sendPasswordResetEmail: this.sendPasswordResetEmail.bind(this),
+
+        // Hack: needed for tests
+        _: this
+      };
+
+      return this._object;
+    },
+
+
+    /********************/
+    /*  Authentication  */
+    /********************/
+
+    /**
+     * Authenticates the Firebase reference with a custom authentication token.
+     *
+     * @param {string} authToken An authentication token or a Firebase Secret. A Firebase Secret
+     * should only be used for authenticating a server process and provides full read / write
+     * access to the entire Firebase.
+     * @return {Promise<Object>} A promise fulfilled with an object containing authentication data.
+     */
+    signInWithCustomToken: function(authToken) {
+      return this._q.when(this._auth.signInWithCustomToken(authToken));
+    },
+
+    /**
+     * Authenticates the Firebase reference anonymously.
+     *
+     * @return {Promise<Object>} A promise fulfilled with an object containing authentication data.
+     */
+    signInAnonymously: function() {
+      return this._q.when(this._auth.signInAnonymously());
+    },
+
+    /**
+     * Authenticates the Firebase reference with an email/password user.
+     *
+     * @param {String} email An email address for the new user.
+     * @param {String} password A password for the new email.
+     * @return {Promise<Object>} A promise fulfilled with an object containing authentication data.
+     */
+    signInWithEmailAndPassword: function(email, password) {
+      return this._q.when(this._auth.signInWithEmailAndPassword(email, password));
+    },
+
+    /**
+     * Authenticates the Firebase reference with the OAuth popup flow.
+     *
+     * @param {object|string} provider A firebase.auth.AuthProvider or a unique provider ID like 'facebook'.
+     * @return {Promise<Object>} A promise fulfilled with an object containing authentication data.
+     */
+    signInWithPopup: function(provider) {
+      return this._q.when(this._auth.signInWithPopup(this._getProvider(provider)));
+    },
+
+    /**
+     * Authenticates the Firebase reference with the OAuth redirect flow.
+     *
+     * @param {object|string} provider A firebase.auth.AuthProvider or a unique provider ID like 'facebook'.
+     * @return {Promise<Object>} A promise fulfilled with an object containing authentication data.
+     */
+    signInWithRedirect: function(provider) {
+      return this._q.when(this._auth.signInWithRedirect(this._getProvider(provider)));
+    },
+
+    /**
+     * Authenticates the Firebase reference with an OAuth token.
+     *
+     * @param {firebase.auth.AuthCredential} credential The Firebase credential.
+     * @return {Promise<Object>} A promise fulfilled with an object containing authentication data.
+     */
+    signInWithCredential: function(credential) {
+      return this._q.when(this._auth.signInWithCredential(credential));
+    },
+
+    /**
+     * Unauthenticates the Firebase reference.
+     */
+    signOut: function() {
+      if (this.getAuth() !== null) {
+        this._auth.signOut();
+      }
+    },
+
+
+    /**************************/
+    /*  Authentication State  */
+    /**************************/
+    /**
+     * Asynchronously fires the provided callback with the current authentication data every time
+     * the authentication data changes. It also fires as soon as the authentication data is
+     * retrieved from the server.
+     *
+     * @param {function} callback A callback that fires when the client's authenticate state
+     * changes. If authenticated, the callback will be passed an object containing authentication
+     * data according to the provider used to authenticate. Otherwise, it will be passed null.
+     * @param {string} [context] If provided, this object will be used as this when calling your
+     * callback.
+     * @return {Promise<Function>} A promised fulfilled with a function which can be used to
+     * deregister the provided callback.
+     */
+    onAuthStateChanged: function(callback, context) {
+      var fn = this._utils.debounce(callback, context, 0);
+      var off = this._auth.onAuthStateChanged(fn);
+
+      // Return a method to detach the `onAuthStateChanged()` callback.
+      return off;
+    },
+
+    /**
+     * Synchronously retrieves the current authentication data.
+     *
+     * @return {Object} The client's authentication data.
+     */
+    getAuth: function() {
+      return this._auth.currentUser;
+    },
+
+    /**
+     * Helper onAuthStateChanged() callback method for the two router-related methods.
+     *
+     * @param {boolean} rejectIfAuthDataIsNull Determines if the returned promise should be
+     * resolved or rejected upon an unauthenticated client.
+     * @return {Promise<Object>} A promise fulfilled with the client's authentication state or
+     * rejected if the client is unauthenticated and rejectIfAuthDataIsNull is true.
+     */
+    _routerMethodOnAuthPromise: function(rejectIfAuthDataIsNull) {
+      var self = this;
+
+      // wait for the initial auth state to resolve; on page load we have to request auth state
+      // asynchronously so we don't want to resolve router methods or flash the wrong state
+      return this._initialAuthResolver.then(function() {
+        // auth state may change in the future so rather than depend on the initially resolved state
+        // we also check the auth data (synchronously) if a new promise is requested, ensuring we resolve
+        // to the current auth state and not a stale/initial state
+        var authData = self.getAuth(), res = null;
+        if (rejectIfAuthDataIsNull && authData === null) {
+          res = self._q.reject("AUTH_REQUIRED");
+        }
+        else {
+          res = self._q.when(authData);
+        }
+        return res;
+      });
+    },
+
+    /**
+     * Helper method to turn provider names into AuthProvider instances
+     *
+     * @param {object} stringOrProvider Provider ID string to AuthProvider instance
+     * @return {firebdase.auth.AuthProvider} A valid AuthProvider instance
+     */
+    _getProvider: function (stringOrProvider) {
+      var provider;
+      if (typeof stringOrProvider == "string") {
+        var providerID = stringOrProvider.slice(0, 1).toUpperCase() + stringOrProvider.slice(1);
+        provider = new firebase.auth[providerID+"AuthProvider"]();
+      } else {
+        provider = stringOrProvider;
+      }
+      return provider;
+    },
+
+    /**
+     * Helper that returns a promise which resolves when the initial auth state has been
+     * fetched from the Firebase server. This never rejects and resolves to undefined.
+     *
+     * @return {Promise<Object>} A promise fulfilled when the server returns initial auth state.
+     */
+    _initAuthResolver: function() {
+      var auth = this._auth;
+
+      return this._q(function(resolve) {
+        var off;
+        function callback() {
+          // Turn off this onAuthStateChanged() callback since we just needed to get the authentication data once.
+          off();
+          resolve();
+        }
+        off = auth.onAuthStateChanged(callback);
+      });
+    },
+
+    /**
+     * Utility method which can be used in a route's resolve() method to require that a route has
+     * a logged in client.
+     *
+     * @returns {Promise<Object>} A promise fulfilled with the client's current authentication
+     * state or rejected if the client is not authenticated.
+     */
+    requireSignIn: function() {
+      return this._routerMethodOnAuthPromise(true);
+    },
+
+    /**
+     * Utility method which can be used in a route's resolve() method to grab the current
+     * authentication data.
+     *
+     * @returns {Promise<Object|null>} A promise fulfilled with the client's current authentication
+     * state, which will be null if the client is not authenticated.
+     */
+    waitForSignIn: function() {
+      return this._routerMethodOnAuthPromise(false);
+    },
+
+
+    /*********************/
+    /*  User Management  */
+    /*********************/
+    /**
+     * Creates a new email/password user. Note that this function only creates the user, if you
+     * wish to log in as the newly created user, call $authWithPassword() after the promise for
+     * this method has been resolved.
+     *
+     * @param {string} email An email for this user.
+     * @param {string} password A password for this user.
+     * @return {Promise<Object>} A promise fulfilled with the user object, which contains the
+     * uid of the created user.
+     */
+    createUserWithEmailAndPassword: function(email, password) {
+      return this._q.when(this._auth.createUserWithEmailAndPassword(email, password));
+    },
+
+    /**
+     * Changes the password for an email/password user.
+     *
+     * @param {string} password A new password for the current user.
+     * @return {Promise<>} An empty promise fulfilled once the password change is complete.
+     */
+    updatePassword: function(password) {
+      var user = this.getAuth();
+      if (user) {
+        return this._q.when(user.updatePassword(password));
+      } else {
+        return this._q.reject("Cannot update password since there is no logged in user.");
+      }
+    },
+
+    /**
+     * Changes the email for an email/password user.
+     *
+     * @param {String} email The new email for the currently logged in user.
+     * @return {Promise<>} An empty promise fulfilled once the email change is complete.
+     */
+    updateEmail: function(email) {
+      var user = this.getAuth();
+      if (user) {
+        return this._q.when(user.updateEmail(email));
+      } else {
+        return this._q.reject("Cannot update email since there is no logged in user.");
+      }
+    },
+
+    /**
+     * Deletes the currently logged in user.
+     *
+     * @return {Promise<>} An empty promise fulfilled once the user is removed.
+     */
+    deleteUser: function() {
+      var user = this.getAuth();
+      if (user) {
+        return this._q.when(user.delete());
+      } else {
+        return this._q.reject("Cannot delete user since there is no logged in user.");
+      }
+    },
+
+
+    /**
+     * Sends a password reset email to an email/password user.
+     *
+     * @param {string} email An email address to send a password reset to.
+     * @return {Promise<>} An empty promise fulfilled once the reset password email is sent.
+     */
+    sendPasswordResetEmail: function(email) {
+      return this._q.when(this._auth.sendPasswordResetEmail(email));
+    }
+  };
+})();
+
+(function() {
+  'use strict';
+  /**
+   * Creates and maintains a synchronized object, with 2-way bindings between Angular and Firebase.
+   *
+   * Implementations of this class are contracted to provide the following internal methods,
+   * which are used by the synchronization process and 3-way bindings:
+   *    $$updated - called whenever a change occurs (a value event from Firebase)
+   *    $$error - called when listeners are canceled due to a security error
+   *    $$notify - called to update $watch listeners and trigger updates to 3-way bindings
+   *    $ref - called to obtain the underlying Firebase reference
+   *
+   * Instead of directly modifying this class, one should generally use the $extend
+   * method to add or change how methods behave:
+   *
+   * <pre><code>
+   * var ExtendedObject = $firebaseObject.$extend({
+   *    // add a new method to the prototype
+   *    foo: function() { return 'bar'; },
+   * });
+   *
+   * var obj = new ExtendedObject(ref);
+   * </code></pre>
+   */
+  angular.module('firebase').factory('$firebaseObject', [
+    '$parse', '$firebaseUtils', '$log', '$q',
+    function($parse, $firebaseUtils, $log, $q) {
+      /**
+       * Creates a synchronized object with 2-way bindings between Angular and Firebase.
+       *
+       * @param {Firebase} ref
+       * @returns {FirebaseObject}
+       * @constructor
+       */
+      function FirebaseObject(ref) {
+        if( !(this instanceof FirebaseObject) ) {
+          return new FirebaseObject(ref);
+        }
+        // These are private config props and functions used internally
+        // they are collected here to reduce clutter in console.log and forEach
+        this.$$conf = {
+          // synchronizes data to Firebase
+          sync: new ObjectSyncManager(this, ref),
+          // stores the Firebase ref
+          ref: ref,
+          // synchronizes $scope variables with this object
+          binding: new ThreeWayBinding(this),
+          // stores observers registered with $watch
+          listeners: []
+        };
+
+        // this bit of magic makes $$conf non-enumerable and non-configurable
+        // and non-writable (its properties are still writable but the ref cannot be replaced)
+        // we redundantly assign it above so the IDE can relax
+        Object.defineProperty(this, '$$conf', {
+          value: this.$$conf
+        });
+
+        this.$id = ref.ref.key;
+        this.$priority = null;
+
+        $firebaseUtils.applyDefaults(this, this.$$defaults);
+
+        // start synchronizing data with Firebase
+        this.$$conf.sync.init();
+      }
+
+      FirebaseObject.prototype = {
+        /**
+         * Saves all data on the FirebaseObject back to Firebase.
+         * @returns a promise which will resolve after the save is completed.
+         */
+        $save: function () {
+          var self = this;
+          var ref = self.$ref();
+          var def = $q.defer();
+          var dataJSON;
+
+          try {
+            dataJSON = $firebaseUtils.toJSON(self);
+          } catch (e) {
+            def.reject(e);
+          }
+
+          if (typeof dataJSON !== 'undefined') {
+            $firebaseUtils.doSet(ref, dataJSON).then(function() {
+              self.$$notify();
+              def.resolve(self.$ref());
+            }).catch(def.reject);
+          }
+
+          return def.promise;
+        },
+
+        /**
+         * Removes all keys from the FirebaseObject and also removes
+         * the remote data from the server.
+         *
+         * @returns a promise which will resolve after the op completes
+         */
+        $remove: function() {
+          var self = this;
+          $firebaseUtils.trimKeys(self, {});
+          self.$value = null;
+          return $firebaseUtils.doRemove(self.$ref()).then(function() {
+            self.$$notify();
+            return self.$ref();
+          });
+        },
+
+        /**
+         * The loaded method is invoked after the initial batch of data arrives from the server.
+         * When this resolves, all data which existed prior to calling $asObject() is now cached
+         * locally in the object.
+         *
+         * As a shortcut is also possible to pass resolve/reject methods directly into this
+         * method just as they would be passed to .then()
+         *
+         * @param {Function} resolve
+         * @param {Function} reject
+         * @returns a promise which resolves after initial data is downloaded from Firebase
+         */
+        $loaded: function(resolve, reject) {
+          var promise = this.$$conf.sync.ready();
+          if (arguments.length) {
+            // allow this method to be called just like .then
+            // by passing any arguments on to .then
+            promise = promise.then.call(promise, resolve, reject);
+          }
+          return promise;
+        },
+
+        /**
+         * @returns {Firebase} the original Firebase instance used to create this object.
+         */
+        $ref: function () {
+          return this.$$conf.ref;
+        },
+
+        /**
+         * Creates a 3-way data sync between this object, the Firebase server, and a
+         * scope variable. This means that any changes made to the scope variable are
+         * pushed to Firebase, and vice versa.
+         *
+         * If scope emits a $destroy event, the binding is automatically severed. Otherwise,
+         * it is possible to unbind the scope variable by using the `unbind` function
+         * passed into the resolve method.
+         *
+         * Can only be bound to one scope variable at a time. If a second is attempted,
+         * the promise will be rejected with an error.
+         *
+         * @param {object} scope
+         * @param {string} varName
+         * @returns a promise which resolves to an unbind method after data is set in scope
+         */
+        $bindTo: function (scope, varName) {
+          var self = this;
+          return self.$loaded().then(function () {
+            return self.$$conf.binding.bindTo(scope, varName);
+          });
+        },
+
+        /**
+         * Listeners passed into this method are notified whenever a new change is received
+         * from the server. Each invocation is sent an object containing
+         * <code>{ type: 'value', key: 'my_firebase_id' }</code>
+         *
+         * This method returns an unbind function that can be used to detach the listener.
+         *
+         * @param {Function} cb
+         * @param {Object} [context]
+         * @returns {Function} invoke to stop observing events
+         */
+        $watch: function (cb, context) {
+          var list = this.$$conf.listeners;
+          list.push([cb, context]);
+          // an off function for cancelling the listener
+          return function () {
+            var i = list.findIndex(function (parts) {
+              return parts[0] === cb && parts[1] === context;
+            });
+            if (i > -1) {
+              list.splice(i, 1);
+            }
+          };
+        },
+
+        /**
+         * Informs $firebase to stop sending events and clears memory being used
+         * by this object (delete's its local content).
+         */
+        $destroy: function(err) {
+          var self = this;
+          if (!self.$isDestroyed) {
+            self.$isDestroyed = true;
+            self.$$conf.sync.destroy(err);
+            self.$$conf.binding.destroy();
+            $firebaseUtils.each(self, function (v, k) {
+              delete self[k];
+            });
+          }
+        },
+
+        /**
+         * Called by $firebase whenever an item is changed at the server.
+         * This method must exist on any objectFactory passed into $firebase.
+         *
+         * It should return true if any changes were made, otherwise `$$notify` will
+         * not be invoked.
+         *
+         * @param {object} snap a Firebase snapshot
+         * @return {boolean} true if any changes were made.
+         */
+        $$updated: function (snap) {
+          // applies new data to this object
+          var changed = $firebaseUtils.updateRec(this, snap);
+          // applies any defaults set using $$defaults
+          $firebaseUtils.applyDefaults(this, this.$$defaults);
+          // returning true here causes $$notify to be triggered
+          return changed;
+        },
+
+        /**
+         * Called whenever a security error or other problem causes the listeners to become
+         * invalid. This is generally an unrecoverable error.
+         * @param {Object} err which will have a `code` property and possibly a `message`
+         */
+        $$error: function (err) {
+          // prints an error to the console (via Angular's logger)
+          $log.error(err);
+          // frees memory and cancels any remaining listeners
+          this.$destroy(err);
+        },
+
+        /**
+         * Called internally by $bindTo when data is changed in $scope.
+         * Should apply updates to this record but should not call
+         * notify().
+         */
+        $$scopeUpdated: function(newData) {
+          // we use a one-directional loop to avoid feedback with 3-way bindings
+          // since set() is applied locally anyway, this is still performant
+          var def = $q.defer();
+          this.$ref().set($firebaseUtils.toJSON(newData), $firebaseUtils.makeNodeResolver(def));
+          return def.promise;
+        },
+
+        /**
+         * Updates any bound scope variables and
+         * notifies listeners registered with $watch
+         */
+        $$notify: function() {
+          var self = this, list = this.$$conf.listeners.slice();
+          // be sure to do this after setting up data and init state
+          angular.forEach(list, function (parts) {
+            parts[0].call(parts[1], {event: 'value', key: self.$id});
+          });
+        },
+
+        /**
+         * Overrides how Angular.forEach iterates records on this object so that only
+         * fields stored in Firebase are part of the iteration. To include meta fields like
+         * $id and $priority in the iteration, utilize for(key in obj) instead.
+         */
+        forEach: function(iterator, context) {
+          return $firebaseUtils.each(this, iterator, context);
+        }
+      };
+
+      /**
+       * This method allows FirebaseObject to be copied into a new factory. Methods passed into this
+       * function will be added onto the object's prototype. They can override existing methods as
+       * well.
+       *
+       * In addition to passing additional methods, it is also possible to pass in a class function.
+       * The prototype on that class function will be preserved, and it will inherit from
+       * FirebaseObject. It's also possible to do both, passing a class to inherit and additional
+       * methods to add onto the prototype.
+       *
+       * Once a factory is obtained by this method, it can be passed into $firebase as the
+       * `objectFactory` parameter:
+       *
+       * <pre><code>
+       * var MyFactory = $firebaseObject.$extend({
+       *    // add a method onto the prototype that prints a greeting
+       *    getGreeting: function() {
+       *       return 'Hello ' + this.first_name + ' ' + this.last_name + '!';
+       *    }
+       * });
+       *
+       * // use our new factory in place of $firebaseObject
+       * var obj = $firebase(ref, {objectFactory: MyFactory}).$asObject();
+       * </code></pre>
+       *
+       * @param {Function} [ChildClass] a child class which should inherit FirebaseObject
+       * @param {Object} [methods] a list of functions to add onto the prototype
+       * @returns {Function} a new factory suitable for use with $firebase
+       */
+      FirebaseObject.$extend = function(ChildClass, methods) {
+        if( arguments.length === 1 && angular.isObject(ChildClass) ) {
+          methods = ChildClass;
+          ChildClass = function(ref) {
+            if( !(this instanceof ChildClass) ) {
+              return new ChildClass(ref);
+            }
+            FirebaseObject.apply(this, arguments);
+          };
+        }
+        return $firebaseUtils.inherit(ChildClass, FirebaseObject, methods);
+      };
+
+      /**
+       * Creates a three-way data binding on a scope variable.
+       *
+       * @param {FirebaseObject} rec
+       * @returns {*}
+       * @constructor
+       */
+      function ThreeWayBinding(rec) {
+        this.subs = [];
+        this.scope = null;
+        this.key = null;
+        this.rec = rec;
+      }
+
+      ThreeWayBinding.prototype = {
+        assertNotBound: function(varName) {
+          if( this.scope ) {
+            var msg = 'Cannot bind to ' + varName + ' because this instance is already bound to ' +
+              this.key + '; one binding per instance ' +
+              '(call unbind method or create another FirebaseObject instance)';
+            $log.error(msg);
+            return $q.reject(msg);
+          }
+        },
+
+        bindTo: function(scope, varName) {
+          function _bind(self) {
+            var sending = false;
+            var parsed = $parse(varName);
+            var rec = self.rec;
+            self.scope = scope;
+            self.varName = varName;
+
+            function equals(scopeValue) {
+              return angular.equals(scopeValue, rec) &&
+                scopeValue.$priority === rec.$priority &&
+                scopeValue.$value === rec.$value;
+            }
+
+            function setScope(rec) {
+              parsed.assign(scope, $firebaseUtils.scopeData(rec));
+            }
+
+            var send = $firebaseUtils.debounce(function(val) {
+              var scopeData = $firebaseUtils.scopeData(val);
+              rec.$$scopeUpdated(scopeData)
+                ['finally'](function() {
+                  sending = false;
+                  if(!scopeData.hasOwnProperty('$value')){
+                    delete rec.$value;
+                    delete parsed(scope).$value;
+                  }
+                  setScope(rec);
+                }
+              );
+            }, 50, 500);
+
+            var scopeUpdated = function(newVal) {
+              newVal = newVal[0];
+              if( !equals(newVal) ) {
+                sending = true;
+                send(newVal);
+              }
+            };
+
+            var recUpdated = function() {
+              if( !sending && !equals(parsed(scope)) ) {
+                setScope(rec);
+              }
+            };
+
+            // $watch will not check any vars prefixed with $, so we
+            // manually check $priority and $value using this method
+            function watchExp(){
+              var obj = parsed(scope);
+              return [obj, obj.$priority, obj.$value];
+            }
+
+            setScope(rec);
+            self.subs.push(scope.$on('$destroy', self.unbind.bind(self)));
+
+            // monitor scope for any changes
+            self.subs.push(scope.$watch(watchExp, scopeUpdated, true));
+
+            // monitor the object for changes
+            self.subs.push(rec.$watch(recUpdated));
+
+            return self.unbind.bind(self);
+          }
+
+          return this.assertNotBound(varName) || _bind(this);
+        },
+
+        unbind: function() {
+          if( this.scope ) {
+            angular.forEach(this.subs, function(unbind) {
+              unbind();
+            });
+            this.subs = [];
+            this.scope = null;
+            this.key = null;
+          }
+        },
+
+        destroy: function() {
+          this.unbind();
+          this.rec = null;
+        }
+      };
+
+      function ObjectSyncManager(firebaseObject, ref) {
+        function destroy(err) {
+          if( !sync.isDestroyed ) {
+            sync.isDestroyed = true;
+            ref.off('value', applyUpdate);
+            firebaseObject = null;
+            initComplete(err||'destroyed');
+          }
+        }
+
+        function init() {
+          ref.on('value', applyUpdate, error);
+          ref.once('value', function(snap) {
+            if (angular.isArray(snap.val())) {
+              $log.warn('Storing data using array indices in Firebase can result in unexpected behavior. See https://firebase.google.com/docs/database/web/structure-data for more information. Also note that you probably wanted $firebaseArray and not $firebaseObject.');
+            }
+
+            initComplete(null);
+          }, initComplete);
+        }
+
+        // call initComplete(); do not call this directly
+        function _initComplete(err) {
+          if( !isResolved ) {
+            isResolved = true;
+            if( err ) { def.reject(err); }
+            else { def.resolve(firebaseObject); }
+          }
+        }
+
+        var isResolved = false;
+        var def = $q.defer();
+        var applyUpdate = $firebaseUtils.batch(function(snap) {
+          var changed = firebaseObject.$$updated(snap);
+          if( changed ) {
+            // notifies $watch listeners and
+            // updates $scope if bound to a variable
+            firebaseObject.$$notify();
+          }
+        });
+        var error = $firebaseUtils.batch(function(err) {
+          _initComplete(err);
+          if( firebaseObject ) {
+            firebaseObject.$$error(err);
+          }
+        });
+        var initComplete = $firebaseUtils.batch(_initComplete);
+
+        var sync = {
+          isDestroyed: false,
+          destroy: destroy,
+          init: init,
+          ready: function() { return def.promise; }
+        };
+        return sync;
+      }
+
+      return FirebaseObject;
+    }
+  ]);
+
+  /** @deprecated */
+  angular.module('firebase').factory('$FirebaseObject', ['$log', '$firebaseObject',
+    function($log, $firebaseObject) {
+      return function() {
+        $log.warn('$FirebaseObject has been renamed. Use $firebaseObject instead.');
+        return $firebaseObject.apply(null, arguments);
+      };
+    }
+  ]);
+})();
+
+(function() {
+  'use strict';
+
+  angular.module("firebase")
+
+    /** @deprecated */
+    .factory("$firebase", function() {
+      return function() {
+        throw new Error('$firebase has been removed. You may instantiate $firebaseArray and $firebaseObject ' +
+        'directly now. For simple write operations, just use the Firebase ref directly. ' +
+        'See the AngularFire 1.0.0 changelog for details: https://github.com/firebase/angularfire/releases/tag/v1.0.0');
+      };
+    });
+
+})();
+
+(function() {
+  "use strict";
+
+  function FirebaseAuthService($firebaseAuth) {
+    return $firebaseAuth();
+  }
+  FirebaseAuthService.$inject = ['$firebaseAuth', '$firebaseRef'];
+
+  angular.module('firebase')
+    .factory('$firebaseAuthService', FirebaseAuthService);
+
+})();
+
+(function() {
+  "use strict";
+
+  function FirebaseRef() {
+    this.urls = null;
+    this.registerUrl = function registerUrl(urlOrConfig) {
+
+      if (typeof urlOrConfig === 'string') {
+        this.urls = {};
+        this.urls.default = urlOrConfig;
+      }
+
+      if (angular.isObject(urlOrConfig)) {
+        this.urls = urlOrConfig;
+      }
+
+    };
+
+    this.$$checkUrls = function $$checkUrls(urlConfig) {
+      if (!urlConfig) {
+        return new Error('No Firebase URL registered. Use firebaseRefProvider.registerUrl() in the config phase. This is required if you are using $firebaseAuthService.');
+      }
+      if (!urlConfig.default) {
+        return new Error('No default Firebase URL registered. Use firebaseRefProvider.registerUrl({ default: "https://<my-firebase-app>.firebaseio.com/"}).');
+      }
+    };
+
+    this.$$createRefsFromUrlConfig = function $$createMultipleRefs(urlConfig) {
+      var refs = {};
+      var error = this.$$checkUrls(urlConfig);
+      if (error) { throw error; }
+      angular.forEach(urlConfig, function(value, key) {
+        refs[key] = firebase.database().refFromURL(value);
+      });
+      return refs;
+    };
+
+    this.$get = function FirebaseRef_$get() {
+      return this.$$createRefsFromUrlConfig(this.urls);
+    };
+  }
+
+  angular.module('firebase')
+    .provider('$firebaseRef', FirebaseRef);
+
+})();
+
+'use strict';
+
+// Shim Array.indexOf for IE compatibility.
+if (!Array.prototype.indexOf) {
+  Array.prototype.indexOf = function (searchElement, fromIndex) {
+    if (this === undefined || this === null) {
+      throw new TypeError("'this' is null or not defined");
+    }
+    // Hack to convert object.length to a UInt32
+    // jshint -W016
+    var length = this.length >>> 0;
+    fromIndex = +fromIndex || 0;
+    // jshint +W016
+
+    if (Math.abs(fromIndex) === Infinity) {
+      fromIndex = 0;
+    }
+
+    if (fromIndex < 0) {
+      fromIndex += length;
+      if (fromIndex < 0) {
+        fromIndex = 0;
+      }
+    }
+
+    for (;fromIndex < length; fromIndex++) {
+      if (this[fromIndex] === searchElement) {
+        return fromIndex;
+      }
+    }
+
+    return -1;
+  };
+}
+
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/bind
+if (!Function.prototype.bind) {
+  Function.prototype.bind = function (oThis) {
+    if (typeof this !== "function") {
+      // closest thing possible to the ECMAScript 5
+      // internal IsCallable function
+      throw new TypeError("Function.prototype.bind - what is trying to be bound is not callable");
+    }
+
+    var aArgs = Array.prototype.slice.call(arguments, 1),
+      fToBind = this,
+      fNOP = function () {},
+      fBound = function () {
+        return fToBind.apply(this instanceof fNOP && oThis
+            ? this
+            : oThis,
+          aArgs.concat(Array.prototype.slice.call(arguments)));
+      };
+
+    fNOP.prototype = this.prototype;
+    fBound.prototype = new fNOP();
+
+    return fBound;
+  };
+}
+
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/findIndex
+if (!Array.prototype.findIndex) {
+  Object.defineProperty(Array.prototype, 'findIndex', {
+    enumerable: false,
+    configurable: true,
+    writable: true,
+    value: function(predicate) {
+      if (this == null) {
+        throw new TypeError('Array.prototype.find called on null or undefined');
+      }
+      if (typeof predicate !== 'function') {
+        throw new TypeError('predicate must be a function');
+      }
+      var list = Object(this);
+      var length = list.length >>> 0;
+      var thisArg = arguments[1];
+      var value;
+
+      for (var i = 0; i < length; i++) {
+        if (i in list) {
+          value = list[i];
+          if (predicate.call(thisArg, value, i, list)) {
+            return i;
+          }
+        }
+      }
+      return -1;
+    }
+  });
+}
+
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/create
+if (typeof Object.create != 'function') {
+  (function () {
+    var F = function () {};
+    Object.create = function (o) {
+      if (arguments.length > 1) {
+        throw new Error('Second argument not supported');
+      }
+      if (o === null) {
+        throw new Error('Cannot set a null [[Prototype]]');
+      }
+      if (typeof o != 'object') {
+        throw new TypeError('Argument must be an object');
+      }
+      F.prototype = o;
+      return new F();
+    };
+  })();
+}
+
+// From https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/keys
+if (!Object.keys) {
+  Object.keys = (function () {
+    'use strict';
+    var hasOwnProperty = Object.prototype.hasOwnProperty,
+      hasDontEnumBug = !({toString: null}).propertyIsEnumerable('toString'),
+      dontEnums = [
+        'toString',
+        'toLocaleString',
+        'valueOf',
+        'hasOwnProperty',
+        'isPrototypeOf',
+        'propertyIsEnumerable',
+        'constructor'
+      ],
+      dontEnumsLength = dontEnums.length;
+
+    return function (obj) {
+      if (typeof obj !== 'object' && (typeof obj !== 'function' || obj === null)) {
+        throw new TypeError('Object.keys called on non-object');
+      }
+
+      var result = [], prop, i;
+
+      for (prop in obj) {
+        if (hasOwnProperty.call(obj, prop)) {
+          result.push(prop);
+        }
+      }
+
+      if (hasDontEnumBug) {
+        for (i = 0; i < dontEnumsLength; i++) {
+          if (hasOwnProperty.call(obj, dontEnums[i])) {
+            result.push(dontEnums[i]);
+          }
+        }
+      }
+      return result;
+    };
+  }());
+}
+
+// http://ejohn.org/blog/objectgetprototypeof/
+if ( typeof Object.getPrototypeOf !== "function" ) {
+  if ( typeof "test".__proto__ === "object" ) {
+    Object.getPrototypeOf = function(object){
+      return object.__proto__;
+    };
+  } else {
+    Object.getPrototypeOf = function(object){
+      // May break if the constructor has been tampered with
+      return object.constructor.prototype;
+    };
+  }
+}
+
+(function() {
+  'use strict';
+
+  angular.module('firebase')
+    .factory('$firebaseConfig', ["$firebaseArray", "$firebaseObject", "$injector",
+      function($firebaseArray, $firebaseObject, $injector) {
+        return function(configOpts) {
+          // make a copy we can modify
+          var opts = angular.extend({}, configOpts);
+          // look up factories if passed as string names
+          if( typeof opts.objectFactory === 'string' ) {
+            opts.objectFactory = $injector.get(opts.objectFactory);
+          }
+          if( typeof opts.arrayFactory === 'string' ) {
+            opts.arrayFactory = $injector.get(opts.arrayFactory);
+          }
+          // extend defaults and return
+          return angular.extend({
+            arrayFactory: $firebaseArray,
+            objectFactory: $firebaseObject
+          }, opts);
+        };
+      }
+    ])
+
+    .factory('$firebaseUtils', ["$q", "$timeout", "$rootScope",
+      function($q, $timeout, $rootScope) {
+        var utils = {
+          /**
+           * Returns a function which, each time it is invoked, will gather up the values until
+           * the next "tick" in the Angular compiler process. Then they are all run at the same
+           * time to avoid multiple cycles of the digest loop. Internally, this is done using $evalAsync()
+           *
+           * @param {Function} action
+           * @param {Object} [context]
+           * @returns {Function}
+           */
+          batch: function(action, context) {
+            return function() {
+              var args = Array.prototype.slice.call(arguments, 0);
+              utils.compile(function() {
+                action.apply(context, args);
+              });
+            };
+          },
+
+          /**
+           * A rudimentary debounce method
+           * @param {function} fn the function to debounce
+           * @param {object} [ctx] the `this` context to set in fn
+           * @param {int} wait number of milliseconds to pause before sending out after each invocation
+           * @param {int} [maxWait] max milliseconds to wait before sending out, defaults to wait * 10 or 100
+           */
+          debounce: function(fn, ctx, wait, maxWait) {
+            var start, cancelTimer, args, runScheduledForNextTick;
+            if( typeof(ctx) === 'number' ) {
+              maxWait = wait;
+              wait = ctx;
+              ctx = null;
+            }
+
+            if( typeof wait !== 'number' ) {
+              throw new Error('Must provide a valid integer for wait. Try 0 for a default');
+            }
+            if( typeof(fn) !== 'function' ) {
+              throw new Error('Must provide a valid function to debounce');
+            }
+            if( !maxWait ) { maxWait = wait*10 || 100; }
+
+            // clears the current wait timer and creates a new one
+            // however, if maxWait is exceeded, calls runNow() on the next tick.
+            function resetTimer() {
+              if( cancelTimer ) {
+                cancelTimer();
+                cancelTimer = null;
+              }
+              if( start && Date.now() - start > maxWait ) {
+                if(!runScheduledForNextTick){
+                  runScheduledForNextTick = true;
+                  utils.compile(runNow);
+                }
+              }
+              else {
+                if( !start ) { start = Date.now(); }
+                cancelTimer = utils.wait(runNow, wait);
+              }
+            }
+
+            // Clears the queue and invokes the debounced function with the most recent arguments
+            function runNow() {
+              cancelTimer = null;
+              start = null;
+              runScheduledForNextTick = false;
+              fn.apply(ctx, args);
+            }
+
+            function debounced() {
+              args = Array.prototype.slice.call(arguments, 0);
+              resetTimer();
+            }
+            debounced.running = function() {
+              return start > 0;
+            };
+
+            return debounced;
+          },
+
+          assertValidRef: function(ref, msg) {
+            if( !angular.isObject(ref) ||
+              typeof(ref.ref) !== 'object' ||
+              typeof(ref.ref.transaction) !== 'function' ) {
+              throw new Error(msg || 'Invalid Firebase reference');
+            }
+          },
+
+          // http://stackoverflow.com/questions/7509831/alternative-for-the-deprecated-proto
+          // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/create
+          inherit: function(ChildClass, ParentClass, methods) {
+            var childMethods = ChildClass.prototype;
+            ChildClass.prototype = Object.create(ParentClass.prototype);
+            ChildClass.prototype.constructor = ChildClass; // restoring proper constructor for child class
+            angular.forEach(Object.keys(childMethods), function(k) {
+              ChildClass.prototype[k] = childMethods[k];
+            });
+            if( angular.isObject(methods) ) {
+              angular.extend(ChildClass.prototype, methods);
+            }
+            return ChildClass;
+          },
+
+          getPrototypeMethods: function(inst, iterator, context) {
+            var methods = {};
+            var objProto = Object.getPrototypeOf({});
+            var proto = angular.isFunction(inst) && angular.isObject(inst.prototype)?
+              inst.prototype : Object.getPrototypeOf(inst);
+            while(proto && proto !== objProto) {
+              for (var key in proto) {
+                // we only invoke each key once; if a super is overridden it's skipped here
+                if (proto.hasOwnProperty(key) && !methods.hasOwnProperty(key)) {
+                  methods[key] = true;
+                  iterator.call(context, proto[key], key, proto);
+                }
+              }
+              proto = Object.getPrototypeOf(proto);
+            }
+          },
+
+          getPublicMethods: function(inst, iterator, context) {
+            utils.getPrototypeMethods(inst, function(m, k) {
+              if( typeof(m) === 'function' && k.charAt(0) !== '_' ) {
+                iterator.call(context, m, k);
+              }
+            });
+          },
+
+          makeNodeResolver:function(deferred){
+            return function(err,result){
+              if(err === null){
+                if(arguments.length > 2){
+                  result = Array.prototype.slice.call(arguments,1);
+                }
+
+                deferred.resolve(result);
+              }
+              else {
+                deferred.reject(err);
+              }
+            };
+          },
+
+          wait: function(fn, wait) {
+            var to = $timeout(fn, wait||0);
+            return function() {
+              if( to ) {
+                $timeout.cancel(to);
+                to = null;
+              }
+            };
+          },
+
+          compile: function(fn) {
+            return $rootScope.$evalAsync(fn||function() {});
+          },
+
+          deepCopy: function(obj) {
+            if( !angular.isObject(obj) ) { return obj; }
+            var newCopy = angular.isArray(obj) ? obj.slice() : angular.extend({}, obj);
+            for (var key in newCopy) {
+              if (newCopy.hasOwnProperty(key)) {
+                if (angular.isObject(newCopy[key])) {
+                  newCopy[key] = utils.deepCopy(newCopy[key]);
+                }
+              }
+            }
+            return newCopy;
+          },
+
+          trimKeys: function(dest, source) {
+            utils.each(dest, function(v,k) {
+              if( !source.hasOwnProperty(k) ) {
+                delete dest[k];
+              }
+            });
+          },
+
+          scopeData: function(dataOrRec) {
+            var data = {
+              $id: dataOrRec.$id,
+              $priority: dataOrRec.$priority
+            };
+            var hasPublicProp = false;
+            utils.each(dataOrRec, function(v,k) {
+              hasPublicProp = true;
+              data[k] = utils.deepCopy(v);
+            });
+            if(!hasPublicProp && dataOrRec.hasOwnProperty('$value')){
+              data.$value = dataOrRec.$value;
+            }
+            return data;
+          },
+
+          updateRec: function(rec, snap) {
+            var data = snap.val();
+            var oldData = angular.extend({}, rec);
+
+            // deal with primitives
+            if( !angular.isObject(data) ) {
+              rec.$value = data;
+              data = {};
+            }
+            else {
+              delete rec.$value;
+            }
+
+            // apply changes: remove old keys, insert new data, set priority
+            utils.trimKeys(rec, data);
+            angular.extend(rec, data);
+            rec.$priority = snap.getPriority();
+
+            return !angular.equals(oldData, rec) ||
+              oldData.$value !== rec.$value ||
+              oldData.$priority !== rec.$priority;
+          },
+
+          applyDefaults: function(rec, defaults) {
+            if( angular.isObject(defaults) ) {
+              angular.forEach(defaults, function(v,k) {
+                if( !rec.hasOwnProperty(k) ) {
+                  rec[k] = v;
+                }
+              });
+            }
+            return rec;
+          },
+
+          dataKeys: function(obj) {
+            var out = [];
+            utils.each(obj, function(v,k) {
+              out.push(k);
+            });
+            return out;
+          },
+
+          each: function(obj, iterator, context) {
+            if(angular.isObject(obj)) {
+              for (var k in obj) {
+                if (obj.hasOwnProperty(k)) {
+                  var c = k.charAt(0);
+                  if( c !== '_' && c !== '$' && c !== '.' ) {
+                    iterator.call(context, obj[k], k, obj);
+                  }
+                }
+              }
+            }
+            else if(angular.isArray(obj)) {
+              for(var i = 0, len = obj.length; i < len; i++) {
+                iterator.call(context, obj[i], i, obj);
+              }
+            }
+            return obj;
+          },
+
+          /**
+           * A utility for converting records to JSON objects
+           * which we can save into Firebase. It asserts valid
+           * keys and strips off any items prefixed with $.
+           *
+           * If the rec passed into this method has a toJSON()
+           * method, that will be used in place of the custom
+           * functionality here.
+           *
+           * @param rec
+           * @returns {*}
+           */
+          toJSON: function(rec) {
+            var dat;
+            if( !angular.isObject(rec) ) {
+              rec = {$value: rec};
+            }
+            if (angular.isFunction(rec.toJSON)) {
+              dat = rec.toJSON();
+            }
+            else {
+              dat = {};
+              utils.each(rec, function (v, k) {
+                dat[k] = stripDollarPrefixedKeys(v);
+              });
+            }
+            if( angular.isDefined(rec.$value) && Object.keys(dat).length === 0 && rec.$value !== null ) {
+              dat['.value'] = rec.$value;
+            }
+            if( angular.isDefined(rec.$priority) && Object.keys(dat).length > 0 && rec.$priority !== null ) {
+              dat['.priority'] = rec.$priority;
+            }
+            angular.forEach(dat, function(v,k) {
+              if (k.match(/[.$\[\]#\/]/) && k !== '.value' && k !== '.priority' ) {
+                throw new Error('Invalid key ' + k + ' (cannot contain .$[]#/)');
+              }
+              else if( angular.isUndefined(v) ) {
+                throw new Error('Key '+k+' was undefined. Cannot pass undefined in JSON. Use null instead.');
+              }
+            });
+            return dat;
+          },
+
+          doSet: function(ref, data) {
+            var def = $q.defer();
+            if( angular.isFunction(ref.set) || !angular.isObject(data) ) {
+              // this is not a query, just do a flat set
+              // Use try / catch to handle being passed data which is undefined or has invalid keys
+              try {
+                ref.set(data, utils.makeNodeResolver(def));
+              } catch (err) {
+                def.reject(err);
+              }
+            }
+            else {
+              var dataCopy = angular.extend({}, data);
+              // this is a query, so we will replace all the elements
+              // of this query with the value provided, but not blow away
+              // the entire Firebase path
+              ref.once('value', function(snap) {
+                snap.forEach(function(ss) {
+                  if( !dataCopy.hasOwnProperty(ss.key) ) {
+                    dataCopy[ss.key] = null;
+                  }
+                });
+                ref.ref.update(dataCopy, utils.makeNodeResolver(def));
+              }, function(err) {
+                def.reject(err);
+              });
+            }
+            return def.promise;
+          },
+
+          doRemove: function(ref) {
+            var def = $q.defer();
+            if( angular.isFunction(ref.remove) ) {
+              // ref is not a query, just do a flat remove
+              ref.remove(utils.makeNodeResolver(def));
+            }
+            else {
+              // ref is a query so let's only remove the
+              // items in the query and not the entire path
+              ref.once('value', function(snap) {
+                var promises = [];
+                snap.forEach(function(ss) {
+                  promises.push(ss.ref.remove());
+                });
+                utils.allPromises(promises)
+                  .then(function() {
+                    def.resolve(ref);
+                  },
+                  function(err){
+                    def.reject(err);
+                  }
+                );
+              }, function(err) {
+                def.reject(err);
+              });
+            }
+            return def.promise;
+          },
+
+          /**
+           * AngularFire version number.
+           */
+          VERSION: '2.0.1',
+
+          allPromises: $q.all.bind($q)
+        };
+
+        return utils;
+      }
+    ]);
+
+    function stripDollarPrefixedKeys(data) {
+      if( !angular.isObject(data) ) { return data; }
+      var out = angular.isArray(data)? [] : {};
+      angular.forEach(data, function(v,k) {
+        if(typeof k !== 'string' || k.charAt(0) !== '$') {
+          out[k] = stripDollarPrefixedKeys(v);
+        }
+      });
+      return out;
+    }
+})();
+
+},{}],6:[function(require,module,exports){
+// Make sure dependencies are loaded on the window
+require('angular');
+require('firebase');
+
+// Load the Angular module which uses window.angular and window.Firebase
+require('./dist/angularfire');
+
+// Export the module name from the Angular module
+module.exports = 'firebase';
+
+},{"./dist/angularfire":5,"angular":4,"firebase":7}],7:[function(require,module,exports){
+/**
+ *  Firebase libraries for browser - npm package.
+ *
+ * Usage:
+ *
+ *   firebase = require('firebase');
+ */
+require('./firebase');
+module.exports = firebase;
+
+},{"./firebase":8}],8:[function(require,module,exports){
+(function (global){
+/*! @license Firebase v3.1.0
+    Build: 3.1.0-rc.3
+    Terms: https://developers.google.com/terms */
+(function() { var h="undefined"!=typeof window&&window===this?this:"undefined"!=typeof global?global:this,l=function(){h.Symbol||(h.Symbol=aa);l=function(){}},ba=0,aa=function(a){return"jscomp_symbol_"+a+ba++},m=function(){l();h.Symbol.iterator||(h.Symbol.iterator=h.Symbol("iterator"));m=function(){}},ca=function(){var a=["next","error","complete"];m();l();m();var b=a[Symbol.iterator];if(b)return b.call(a);var c=0;return{next:function(){return c<a.length?{done:!1,value:a[c++]}:{done:!0}}}},p=function(a,b){m();
+a instanceof String&&(a+="");var c=0,d={next:function(){if(c<a.length){var e=c++;return{value:b(e,a[e]),done:!1}}d.next=function(){return{done:!0,value:void 0}};return d.next()}};l();m();d[Symbol.iterator]=function(){return d};return d},q=function(a,b){!Array.prototype[a]&&Object.defineProperties&&Object.defineProperty&&Object.defineProperty(Array.prototype,a,{configurable:!0,enumerable:!1,writable:!0,value:b})},r=function(a,b,c){if(null==a)throw new TypeError("The 'this' value for String.prototype."+
+c+" must not be null or undefined");if(b instanceof RegExp)throw new TypeError("First argument to String.prototype."+c+" must not be a regular expression");return a+""},da=function(a){var b=r(this,null,"repeat");if(0>a||1342177279<a)throw new RangeError("Invalid count value");a|=0;for(var c="";a;)if(a&1&&(c+=b),a>>>=1)b+=b;return c},ea=function(a){var b=r(this,null,"codePointAt"),c=b.length;a=Number(a)||0;if(0<=a&&a<c){a|=0;var d=b.charCodeAt(a);if(55296>d||56319<d||a+1===c)return d;a=b.charCodeAt(a+
+1);return 56320>a||57343<a?d:1024*(d-55296)+a+9216}},fa=function(a,b){return-1!==r(this,a,"includes").indexOf(a,b||0)},ga=function(a,b){var c=r(this,a,"startsWith");a+="";var d=c.length,e=a.length;b=Math.max(0,Math.min(b|0,c.length));for(var f=0;f<e&&b<d;)if(c[b++]!=a[f++])return!1;return f>=e},ha=function(a,b){var c=r(this,a,"endsWith");a+="";void 0===b&&(b=c.length);b=Math.max(0,Math.min(b|0,c.length));for(var d=a.length;0<d&&0<b;)if(c[--b]!=a[--d])return!1;return 0>=d};
+String.prototype.endsWith||(String.prototype.endsWith=ha);String.prototype.startsWith||(String.prototype.startsWith=ga);String.prototype.includes||(String.prototype.includes=fa);String.prototype.codePointAt||(String.prototype.codePointAt=ea);String.prototype.repeat||(String.prototype.repeat=da);q("values",function(){return p(this,function(a,b){return b})});q("keys",function(){return p(this,function(a){return a})});q("entries",function(){return p(this,function(a,b){return[a,b]})});
+var t=this,u=function(){},v=function(a){var b=typeof a;if("object"==b)if(a){if(a instanceof Array)return"array";if(a instanceof Object)return b;var c=Object.prototype.toString.call(a);if("[object Window]"==c)return"object";if("[object Array]"==c||"number"==typeof a.length&&"undefined"!=typeof a.splice&&"undefined"!=typeof a.propertyIsEnumerable&&!a.propertyIsEnumerable("splice"))return"array";if("[object Function]"==c||"undefined"!=typeof a.call&&"undefined"!=typeof a.propertyIsEnumerable&&!a.propertyIsEnumerable("call"))return"function"}else return"null";
+else if("function"==b&&"undefined"==typeof a.call)return"object";return b},w=function(a){return"function"==v(a)},ia=function(a,b,c){return a.call.apply(a.bind,arguments)},ja=function(a,b,c){if(!a)throw Error();if(2<arguments.length){var d=Array.prototype.slice.call(arguments,2);return function(){var c=Array.prototype.slice.call(arguments);Array.prototype.unshift.apply(c,d);return a.apply(b,c)}}return function(){return a.apply(b,arguments)}},x=function(a,b,c){x=Function.prototype.bind&&-1!=Function.prototype.bind.toString().indexOf("native code")?
+ia:ja;return x.apply(null,arguments)},y=function(a,b){var c=Array.prototype.slice.call(arguments,1);return function(){var b=c.slice();b.push.apply(b,arguments);return a.apply(this,b)}},z=function(a,b){function c(){}c.prototype=b.prototype;a.ba=b.prototype;a.prototype=new c;a.prototype.constructor=a;a.aa=function(a,c,f){for(var k=Array(arguments.length-2),g=2;g<arguments.length;g++)k[g-2]=arguments[g];return b.prototype[c].apply(a,k)}};function __extends(a,b){function c(){this.constructor=a}for(var d in b)b.hasOwnProperty(d)&&(a[d]=b[d]);a.prototype=null===b?Object.create(b):(c.prototype=b.prototype,new c)}
+function __decorate(a,b,c,d){var e=arguments.length,f=3>e?b:null===d?d=Object.getOwnPropertyDescriptor(b,c):d,k;if("object"===typeof Reflect&&"function"===typeof Reflect.decorate)f=Reflect.decorate(a,b,c,d);else for(var g=a.length-1;0<=g;g--)if(k=a[g])f=(3>e?k(f):3<e?k(b,c,f):k(b,c))||f;return 3<e&&f&&Object.defineProperty(b,c,f),f}function __metadata(a,b){if("object"===typeof Reflect&&"function"===typeof Reflect.metadata)return Reflect.metadata(a,b)}
+var __param=function(a,b){return function(c,d){b(c,d,a)}},__awaiter=function(a,b,c,d){return new (c||(c=Promise))(function(e,f){function k(a){try{n(d.next(a))}catch(b){f(b)}}function g(a){try{n(d.throw(a))}catch(b){f(b)}}function n(a){a.done?e(a.value):(new c(function(b){b(a.value)})).then(k,g)}n((d=d.apply(a,b)).next())})};var A=function(a){if(Error.captureStackTrace)Error.captureStackTrace(this,A);else{var b=Error().stack;b&&(this.stack=b)}a&&(this.message=String(a))};z(A,Error);A.prototype.name="CustomError";var ka=function(a,b){for(var c=a.split("%s"),d="",e=Array.prototype.slice.call(arguments,1);e.length&&1<c.length;)d+=c.shift()+e.shift();return d+c.join("%s")};var B=function(a,b){b.unshift(a);A.call(this,ka.apply(null,b));b.shift()};z(B,A);B.prototype.name="AssertionError";var la=function(a,b,c,d){var e="Assertion failed";if(c)var e=e+(": "+c),f=d;else a&&(e+=": "+a,f=b);throw new B(""+e,f||[]);},C=function(a,b,c){a||la("",null,b,Array.prototype.slice.call(arguments,2))},D=function(a,b,c){w(a)||la("Expected function but got %s: %s.",[v(a),a],b,Array.prototype.slice.call(arguments,2))};var E=function(a,b,c){this.S=c;this.L=a;this.U=b;this.s=0;this.o=null};E.prototype.get=function(){var a;0<this.s?(this.s--,a=this.o,this.o=a.next,a.next=null):a=this.L();return a};E.prototype.put=function(a){this.U(a);this.s<this.S&&(this.s++,a.next=this.o,this.o=a)};var F;a:{var ma=t.navigator;if(ma){var na=ma.userAgent;if(na){F=na;break a}}F=""};var oa=function(a){t.setTimeout(function(){throw a;},0)},G,pa=function(){var a=t.MessageChannel;"undefined"===typeof a&&"undefined"!==typeof window&&window.postMessage&&window.addEventListener&&-1==F.indexOf("Presto")&&(a=function(){var a=document.createElement("IFRAME");a.style.display="none";a.src="";document.documentElement.appendChild(a);var b=a.contentWindow,a=b.document;a.open();a.write("");a.close();var c="callImmediate"+Math.random(),d="file:"==b.location.protocol?"*":b.location.protocol+
+"//"+b.location.host,a=x(function(a){if(("*"==d||a.origin==d)&&a.data==c)this.port1.onmessage()},this);b.addEventListener("message",a,!1);this.port1={};this.port2={postMessage:function(){b.postMessage(c,d)}}});if("undefined"!==typeof a&&-1==F.indexOf("Trident")&&-1==F.indexOf("MSIE")){var b=new a,c={},d=c;b.port1.onmessage=function(){if(void 0!==c.next){c=c.next;var a=c.F;c.F=null;a()}};return function(a){d.next={F:a};d=d.next;b.port2.postMessage(0)}}return"undefined"!==typeof document&&"onreadystatechange"in
+document.createElement("SCRIPT")?function(a){var b=document.createElement("SCRIPT");b.onreadystatechange=function(){b.onreadystatechange=null;b.parentNode.removeChild(b);b=null;a();a=null};document.documentElement.appendChild(b)}:function(a){t.setTimeout(a,0)}};var H=function(){this.v=this.f=null},qa=new E(function(){return new I},function(a){a.reset()},100);H.prototype.add=function(a,b){var c=qa.get();c.set(a,b);this.v?this.v.next=c:(C(!this.f),this.f=c);this.v=c};H.prototype.remove=function(){var a=null;this.f&&(a=this.f,this.f=this.f.next,this.f||(this.v=null),a.next=null);return a};var I=function(){this.next=this.scope=this.B=null};I.prototype.set=function(a,b){this.B=a;this.scope=b;this.next=null};
+I.prototype.reset=function(){this.next=this.scope=this.B=null};var L=function(a,b){J||ra();K||(J(),K=!0);sa.add(a,b)},J,ra=function(){if(t.Promise&&t.Promise.resolve){var a=t.Promise.resolve(void 0);J=function(){a.then(ta)}}else J=function(){var a=ta,c;!(c=!w(t.setImmediate))&&(c=t.Window&&t.Window.prototype)&&(c=-1==F.indexOf("Edge")&&t.Window.prototype.setImmediate==t.setImmediate);c?(G||(G=pa()),G(a)):t.setImmediate(a)}},K=!1,sa=new H,ta=function(){for(var a;a=sa.remove();){try{a.B.call(a.scope)}catch(b){oa(b)}qa.put(a)}K=!1};var O=function(a,b){this.b=0;this.K=void 0;this.j=this.g=this.u=null;this.m=this.A=!1;if(a!=u)try{var c=this;a.call(b,function(a){N(c,2,a)},function(a){try{if(a instanceof Error)throw a;throw Error("Promise rejected.");}catch(b){}N(c,3,a)})}catch(d){N(this,3,d)}},ua=function(){this.next=this.context=this.h=this.c=this.child=null;this.w=!1};ua.prototype.reset=function(){this.context=this.h=this.c=this.child=null;this.w=!1};
+var va=new E(function(){return new ua},function(a){a.reset()},100),wa=function(a,b,c){var d=va.get();d.c=a;d.h=b;d.context=c;return d},ya=function(a,b,c){xa(a,b,c,null)||L(y(b,a))};O.prototype.then=function(a,b,c){null!=a&&D(a,"opt_onFulfilled should be a function.");null!=b&&D(b,"opt_onRejected should be a function. Did you pass opt_context as the second argument instead of the third?");return za(this,w(a)?a:null,w(b)?b:null,c)};O.prototype.then=O.prototype.then;O.prototype.$goog_Thenable=!0;
+O.prototype.X=function(a,b){return za(this,null,a,b)};var Ba=function(a,b){a.g||2!=a.b&&3!=a.b||Aa(a);C(null!=b.c);a.j?a.j.next=b:a.g=b;a.j=b},za=function(a,b,c,d){var e=wa(null,null,null);e.child=new O(function(a,k){e.c=b?function(c){try{var e=b.call(d,c);a(e)}catch(M){k(M)}}:a;e.h=c?function(b){try{var e=c.call(d,b);a(e)}catch(M){k(M)}}:k});e.child.u=a;Ba(a,e);return e.child};O.prototype.Y=function(a){C(1==this.b);this.b=0;N(this,2,a)};O.prototype.Z=function(a){C(1==this.b);this.b=0;N(this,3,a)};
+var N=function(a,b,c){0==a.b&&(a===c&&(b=3,c=new TypeError("Promise cannot resolve to itself")),a.b=1,xa(c,a.Y,a.Z,a)||(a.K=c,a.b=b,a.u=null,Aa(a),3!=b||Ca(a,c)))},xa=function(a,b,c,d){if(a instanceof O)return null!=b&&D(b,"opt_onFulfilled should be a function."),null!=c&&D(c,"opt_onRejected should be a function. Did you pass opt_context as the second argument instead of the third?"),Ba(a,wa(b||u,c||null,d)),!0;var e;if(a)try{e=!!a.$goog_Thenable}catch(k){e=!1}else e=!1;if(e)return a.then(b,c,d),
+!0;e=typeof a;if("object"==e&&null!=a||"function"==e)try{var f=a.then;if(w(f))return Da(a,f,b,c,d),!0}catch(k){return c.call(d,k),!0}return!1},Da=function(a,b,c,d,e){var f=!1,k=function(a){f||(f=!0,c.call(e,a))},g=function(a){f||(f=!0,d.call(e,a))};try{b.call(a,k,g)}catch(n){g(n)}},Aa=function(a){a.A||(a.A=!0,L(a.N,a))},Ea=function(a){var b=null;a.g&&(b=a.g,a.g=b.next,b.next=null);a.g||(a.j=null);null!=b&&C(null!=b.c);return b};
+O.prototype.N=function(){for(var a;a=Ea(this);){var b=this.b,c=this.K;if(3==b&&a.h&&!a.w){var d;for(d=this;d&&d.m;d=d.u)d.m=!1}if(a.child)a.child.u=null,Fa(a,b,c);else try{a.w?a.c.call(a.context):Fa(a,b,c)}catch(e){Ga.call(null,e)}va.put(a)}this.A=!1};var Fa=function(a,b,c){2==b?a.c.call(a.context,c):a.h&&a.h.call(a.context,c)},Ca=function(a,b){a.m=!0;L(function(){a.m&&Ga.call(null,b)})},Ga=oa;function P(a,b){if(!(b instanceof Object))return b;switch(b.constructor){case Date:return new Date(b.getTime());case Object:void 0===a&&(a={});break;case Array:a=[];break;default:return b}for(var c in b)b.hasOwnProperty(c)&&(a[c]=P(a[c],b[c]));return a};var Ha=Error.captureStackTrace,R=function(a,b){this.code=a;this.message=b;if(Ha)Ha(this,Q.prototype.create);else{var c=Error.apply(this,arguments);this.name="FirebaseError";Object.defineProperty(this,"stack",{get:function(){return c.stack}})}};R.prototype=Object.create(Error.prototype);R.prototype.constructor=R;R.prototype.name="FirebaseError";var Q=function(a,b,c){this.V=a;this.W=b;this.M=c;this.pattern=/\{\$([^}]+)}/g};
+Q.prototype.create=function(a,b){void 0===b&&(b={});var c=this.M[a];a=this.V+"/"+a;var c=void 0===c?"Error":c.replace(this.pattern,function(a,c){return void 0!==b[c]?b[c].toString():"<"+c+"?>"}),c=this.W+": "+c+" ("+a+").",c=new R(a,c),d;for(d in b)b.hasOwnProperty(d)&&"_"!==d.slice(-1)&&(c[d]=b[d]);return c};O.all=function(a){return new O(function(b,c){var d=a.length,e=[];if(d)for(var f=function(a,c){d--;e[a]=c;0==d&&b(e)},k=function(a){c(a)},g=0,n;g<a.length;g++)n=a[g],ya(n,y(f,g),k);else b(e)})};O.resolve=function(a){if(a instanceof O)return a;var b=new O(u);N(b,2,a);return b};O.reject=function(a){return new O(function(b,c){c(a)})};O.prototype["catch"]=O.prototype.X;var S=O;"undefined"!==typeof Promise&&(S=Promise);var Ia=S;function Ja(a,b){a=new T(a,b);return a.subscribe.bind(a)}var T=function(a,b){var c=this;this.a=[];this.J=0;this.task=Ia.resolve();this.l=!1;this.D=b;this.task.then(function(){a(c)}).catch(function(a){c.error(a)})};T.prototype.next=function(a){U(this,function(b){b.next(a)})};T.prototype.error=function(a){U(this,function(b){b.error(a)});this.close(a)};T.prototype.complete=function(){U(this,function(a){a.complete()});this.close()};
+T.prototype.subscribe=function(a,b,c){var d=this,e;if(void 0===a&&void 0===b&&void 0===c)throw Error("Missing Observer.");e=Ka(a)?a:{next:a,error:b,complete:c};void 0===e.next&&(e.next=V);void 0===e.error&&(e.error=V);void 0===e.complete&&(e.complete=V);a=this.$.bind(this,this.a.length);this.l&&this.task.then(function(){try{d.G?e.error(d.G):e.complete()}catch(a){}});this.a.push(e);return a};
+T.prototype.$=function(a){void 0!==this.a&&void 0!==this.a[a]&&(this.a[a]=void 0,--this.J,0===this.J&&void 0!==this.D&&this.D(this))};var U=function(a,b){if(!a.l)for(var c=0;c<a.a.length;c++)La(a,c,b)},La=function(a,b,c){a.task.then(function(){if(void 0!==a.a&&void 0!==a.a[b])try{c(a.a[b])}catch(d){}})};T.prototype.close=function(a){var b=this;this.l||(this.l=!0,void 0!==a&&(this.G=a),this.task.then(function(){b.a=void 0;b.D=void 0}))};
+function Ka(a){if("object"!==typeof a||null===a)return!1;for(var b=ca(),c=b.next();!c.done;c=b.next())if(c=c.value,c in a&&"function"===typeof a[c])return!0;return!1}function V(){};var W=S,X=function(a,b,c){var d=this;this.H=c;this.I=!1;this.i={};this.P={};this.C=b;this.T=P(void 0,a);Object.keys(c.INTERNAL.factories).forEach(function(a){d[a]=d.R.bind(d,a)})};X.prototype.delete=function(){var a=this;return(new W(function(b){Y(a);b()})).then(function(){a.H.INTERNAL.removeApp(a.C);return W.all(Object.keys(a.i).map(function(b){return a.i[b].INTERNAL.delete()}))}).then(function(){a.I=!0;a.i=null;a.P=null})};
+X.prototype.R=function(a){Y(this);void 0===this.i[a]&&(this.i[a]=this.H.INTERNAL.factories[a](this,this.O.bind(this)));return this.i[a]};X.prototype.O=function(a){P(this,a)};var Y=function(a){a.I&&Z(Ma("deleted",{name:a.C}))};Object.defineProperties(X.prototype,{name:{configurable:!0,enumerable:!0,get:function(){Y(this);return this.C}},options:{configurable:!0,enumerable:!0,get:function(){Y(this);return this.T}}});X.prototype.name&&X.prototype.options||X.prototype.delete||console.log("dc");
+function Na(){function a(a){a=a||"[DEFAULT]";var c=b[a];void 0===c&&Z("noApp",{name:a});return c}var b={},c={},d=[],e={initializeApp:function(a,c){void 0===c?c="[DEFAULT]":"string"===typeof c&&""!==c||Z("bad-app-name",{name:c+""});void 0!==b[c]&&Z("dupApp",{name:c});var g=new X(a,c,e);b[c]=g;d.forEach(function(a){return a("create",g)});void 0!=g.INTERNAL&&void 0!=g.INTERNAL.getToken||P(g,{INTERNAL:{getToken:function(){return W.resolve(null)},addAuthTokenListener:function(){},removeAuthTokenListener:function(){}}});
+return g},app:a,apps:null,Promise:W,SDK_VERSION:"0.0.0",INTERNAL:{registerService:function(b,d,g){c[b]&&Z("dupService",{name:b});c[b]=d;d=function(c){void 0===c&&(c=a());return c[b]()};void 0!==g&&P(d,g);return e[b]=d},createFirebaseNamespace:Na,extendNamespace:function(a){P(e,a)},createSubscribe:Ja,ErrorFactory:Q,registerAppHook:function(a){d.push(a)},removeApp:function(a){d.forEach(function(c){return c("delete",b[a])});delete b[a]},factories:c,Promise:O,deepExtend:P}};Object.defineProperty(e,"apps",
+{get:function(){return Object.keys(b).map(function(a){return b[a]})}});a.App=X;return e}function Z(a,b){throw Error(Ma(a,b));}
+function Ma(a,b){b=b||{};b={noApp:"No Firebase App '"+b.name+"' has been created - call Firebase App.initializeApp().","bad-app-name":"Illegal App name: '"+b.name+"'.",dupApp:"Firebase App named '"+b.name+"' already exists.",deleted:"Firebase App named '"+b.name+"' already deleted.",dupService:"Firebase Service named '"+b.name+"' already registered."}[a];return void 0===b?"Application Error: ("+a+")":b};"undefined"!==typeof window&&(window.firebase=Na()); })();
+firebase.SDK_VERSION = "3.1.0";
+(function(){var h,aa=aa||{},l=this,ba=function(){},ca=function(a){var b=typeof a;if("object"==b)if(a){if(a instanceof Array)return"array";if(a instanceof Object)return b;var c=Object.prototype.toString.call(a);if("[object Window]"==c)return"object";if("[object Array]"==c||"number"==typeof a.length&&"undefined"!=typeof a.splice&&"undefined"!=typeof a.propertyIsEnumerable&&!a.propertyIsEnumerable("splice"))return"array";if("[object Function]"==c||"undefined"!=typeof a.call&&"undefined"!=typeof a.propertyIsEnumerable&&
+!a.propertyIsEnumerable("call"))return"function"}else return"null";else if("function"==b&&"undefined"==typeof a.call)return"object";return b},da=function(a){return null===a},ea=function(a){return"array"==ca(a)},fa=function(a){var b=ca(a);return"array"==b||"object"==b&&"number"==typeof a.length},m=function(a){return"string"==typeof a},ga=function(a){return"number"==typeof a},n=function(a){return"function"==ca(a)},ha=function(a){var b=typeof a;return"object"==b&&null!=a||"function"==b},ia=function(a,
+b,c){return a.call.apply(a.bind,arguments)},ja=function(a,b,c){if(!a)throw Error();if(2<arguments.length){var d=Array.prototype.slice.call(arguments,2);return function(){var c=Array.prototype.slice.call(arguments);Array.prototype.unshift.apply(c,d);return a.apply(b,c)}}return function(){return a.apply(b,arguments)}},p=function(a,b,c){p=Function.prototype.bind&&-1!=Function.prototype.bind.toString().indexOf("native code")?ia:ja;return p.apply(null,arguments)},ka=function(a,b){var c=Array.prototype.slice.call(arguments,
+1);return function(){var b=c.slice();b.push.apply(b,arguments);return a.apply(this,b)}},la=Date.now||function(){return+new Date},q=function(a,b){function c(){}c.prototype=b.prototype;a.Gc=b.prototype;a.prototype=new c;a.prototype.constructor=a;a.Fe=function(a,c,f){for(var g=Array(arguments.length-2),k=2;k<arguments.length;k++)g[k-2]=arguments[k];return b.prototype[c].apply(a,g)}};var r=function(a){if(Error.captureStackTrace)Error.captureStackTrace(this,r);else{var b=Error().stack;b&&(this.stack=b)}a&&(this.message=String(a))};q(r,Error);r.prototype.name="CustomError";var ma=function(a,b){for(var c=a.split("%s"),d="",e=Array.prototype.slice.call(arguments,1);e.length&&1<c.length;)d+=c.shift()+e.shift();return d+c.join("%s")},na=String.prototype.trim?function(a){return a.trim()}:function(a){return a.replace(/^[\s\xa0]+|[\s\xa0]+$/g,"")},oa=/&/g,pa=/</g,qa=/>/g,ra=/"/g,sa=/'/g,ta=/\x00/g,ua=/[\x00&<>"']/,u=function(a,b){return-1!=a.indexOf(b)},va=function(a,b){return a<b?-1:a>b?1:0};var wa=function(a,b){b.unshift(a);r.call(this,ma.apply(null,b));b.shift()};q(wa,r);wa.prototype.name="AssertionError";
+var xa=function(a,b,c,d){var e="Assertion failed";if(c)var e=e+(": "+c),f=d;else a&&(e+=": "+a,f=b);throw new wa(""+e,f||[]);},v=function(a,b,c){a||xa("",null,b,Array.prototype.slice.call(arguments,2))},ya=function(a,b){throw new wa("Failure"+(a?": "+a:""),Array.prototype.slice.call(arguments,1));},za=function(a,b,c){ga(a)||xa("Expected number but got %s: %s.",[ca(a),a],b,Array.prototype.slice.call(arguments,2));return a},Aa=function(a,b,c){m(a)||xa("Expected string but got %s: %s.",[ca(a),a],b,Array.prototype.slice.call(arguments,
+2));return a},Ba=function(a,b,c){n(a)||xa("Expected function but got %s: %s.",[ca(a),a],b,Array.prototype.slice.call(arguments,2))};var Ca=Array.prototype.indexOf?function(a,b,c){v(null!=a.length);return Array.prototype.indexOf.call(a,b,c)}:function(a,b,c){c=null==c?0:0>c?Math.max(0,a.length+c):c;if(m(a))return m(b)&&1==b.length?a.indexOf(b,c):-1;for(;c<a.length;c++)if(c in a&&a[c]===b)return c;return-1},w=Array.prototype.forEach?function(a,b,c){v(null!=a.length);Array.prototype.forEach.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=m(a)?a.split(""):a,f=0;f<d;f++)f in e&&b.call(c,e[f],f,a)},Da=function(a,b){for(var c=m(a)?
+a.split(""):a,d=a.length-1;0<=d;--d)d in c&&b.call(void 0,c[d],d,a)},Ea=Array.prototype.map?function(a,b,c){v(null!=a.length);return Array.prototype.map.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=Array(d),f=m(a)?a.split(""):a,g=0;g<d;g++)g in f&&(e[g]=b.call(c,f[g],g,a));return e},Fa=Array.prototype.some?function(a,b,c){v(null!=a.length);return Array.prototype.some.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=m(a)?a.split(""):a,f=0;f<d;f++)if(f in e&&b.call(c,e[f],f,a))return!0;return!1},
+Ha=function(a){var b;a:{b=Ga;for(var c=a.length,d=m(a)?a.split(""):a,e=0;e<c;e++)if(e in d&&b.call(void 0,d[e],e,a)){b=e;break a}b=-1}return 0>b?null:m(a)?a.charAt(b):a[b]},Ia=function(a,b){return 0<=Ca(a,b)},Ka=function(a,b){var c=Ca(a,b),d;(d=0<=c)&&Ja(a,c);return d},Ja=function(a,b){v(null!=a.length);return 1==Array.prototype.splice.call(a,b,1).length},La=function(a,b){var c=0;Da(a,function(d,e){b.call(void 0,d,e,a)&&Ja(a,e)&&c++})},Ma=function(a){return Array.prototype.concat.apply(Array.prototype,
+arguments)},Na=function(a){return Array.prototype.concat.apply(Array.prototype,arguments)},Oa=function(a){var b=a.length;if(0<b){for(var c=Array(b),d=0;d<b;d++)c[d]=a[d];return c}return[]},Pa=function(a,b){for(var c=1;c<arguments.length;c++){var d=arguments[c];if(fa(d)){var e=a.length||0,f=d.length||0;a.length=e+f;for(var g=0;g<f;g++)a[e+g]=d[g]}else a.push(d)}};var Qa=function(a,b){for(var c in a)b.call(void 0,a[c],c,a)},Ra=function(a){var b=[],c=0,d;for(d in a)b[c++]=a[d];return b},Sa=function(a){var b=[],c=0,d;for(d in a)b[c++]=d;return b},Ta=function(a){for(var b in a)return!1;return!0},Ua=function(a,b){for(var c in a)if(!(c in b)||a[c]!==b[c])return!1;for(c in b)if(!(c in a))return!1;return!0},Xa=function(a){var b={},c;for(c in a)b[c]=a[c];return b},Ya="constructor hasOwnProperty isPrototypeOf propertyIsEnumerable toLocaleString toString valueOf".split(" "),
+Za=function(a,b){for(var c,d,e=1;e<arguments.length;e++){d=arguments[e];for(c in d)a[c]=d[c];for(var f=0;f<Ya.length;f++)c=Ya[f],Object.prototype.hasOwnProperty.call(d,c)&&(a[c]=d[c])}};var $a;a:{var ab=l.navigator;if(ab){var bb=ab.userAgent;if(bb){$a=bb;break a}}$a=""}var x=function(a){return u($a,a)};var cb=x("Opera"),y=x("Trident")||x("MSIE"),db=x("Edge"),eb=db||y,fb=x("Gecko")&&!(u($a.toLowerCase(),"webkit")&&!x("Edge"))&&!(x("Trident")||x("MSIE"))&&!x("Edge"),gb=u($a.toLowerCase(),"webkit")&&!x("Edge"),hb=function(){var a=l.document;return a?a.documentMode:void 0},ib;
+a:{var jb="",kb=function(){var a=$a;if(fb)return/rv\:([^\);]+)(\)|;)/.exec(a);if(db)return/Edge\/([\d\.]+)/.exec(a);if(y)return/\b(?:MSIE|rv)[: ]([^\);]+)(\)|;)/.exec(a);if(gb)return/WebKit\/(\S+)/.exec(a);if(cb)return/(?:Version)[ \/]?(\S+)/.exec(a)}();kb&&(jb=kb?kb[1]:"");if(y){var lb=hb();if(null!=lb&&lb>parseFloat(jb)){ib=String(lb);break a}}ib=jb}
+var mb=ib,nb={},z=function(a){var b;if(!(b=nb[a])){b=0;for(var c=na(String(mb)).split("."),d=na(String(a)).split("."),e=Math.max(c.length,d.length),f=0;0==b&&f<e;f++){var g=c[f]||"",k=d[f]||"",t=RegExp("(\\d*)(\\D*)","g"),Y=RegExp("(\\d*)(\\D*)","g");do{var Va=t.exec(g)||["","",""],Wa=Y.exec(k)||["","",""];if(0==Va[0].length&&0==Wa[0].length)break;b=va(0==Va[1].length?0:parseInt(Va[1],10),0==Wa[1].length?0:parseInt(Wa[1],10))||va(0==Va[2].length,0==Wa[2].length)||va(Va[2],Wa[2])}while(0==b)}b=nb[a]=
+0<=b}return b},ob=l.document,pb=ob&&y?hb()||("CSS1Compat"==ob.compatMode?parseInt(mb,10):5):void 0;var qb=null,rb=null,tb=function(a){var b="";sb(a,function(a){b+=String.fromCharCode(a)});return b},sb=function(a,b){function c(b){for(;d<a.length;){var c=a.charAt(d++),e=rb[c];if(null!=e)return e;if(!/^[\s\xa0]*$/.test(c))throw Error("Unknown base64 encoding at char: "+c);}return b}ub();for(var d=0;;){var e=c(-1),f=c(0),g=c(64),k=c(64);if(64===k&&-1===e)break;b(e<<2|f>>4);64!=g&&(b(f<<4&240|g>>2),64!=k&&b(g<<6&192|k))}},ub=function(){if(!qb){qb={};rb={};for(var a=0;65>a;a++)qb[a]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".charAt(a),
+rb[qb[a]]=a,62<=a&&(rb["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.".charAt(a)]=a)}};var wb=function(){this.Xb="";this.Dd=vb};wb.prototype.qc=!0;wb.prototype.oc=function(){return this.Xb};wb.prototype.toString=function(){return"Const{"+this.Xb+"}"};var xb=function(a){if(a instanceof wb&&a.constructor===wb&&a.Dd===vb)return a.Xb;ya("expected object of type Const, got '"+a+"'");return"type_error:Const"},vb={};var A=function(){this.da="";this.Cd=yb};A.prototype.qc=!0;A.prototype.oc=function(){return this.da};A.prototype.toString=function(){return"SafeUrl{"+this.da+"}"};
+var zb=function(a){if(a instanceof A&&a.constructor===A&&a.Cd===yb)return a.da;ya("expected object of type SafeUrl, got '"+a+"' of type "+ca(a));return"type_error:SafeUrl"},Ab=/^(?:(?:https?|mailto|ftp):|[^&:/?#]*(?:[/?#]|$))/i,Cb=function(a){if(a instanceof A)return a;a=a.qc?a.oc():String(a);Ab.test(a)||(a="about:invalid#zClosurez");return Bb(a)},yb={},Bb=function(a){var b=new A;b.da=a;return b};Bb("about:blank");var Eb=function(){this.da="";this.Bd=Db};Eb.prototype.qc=!0;Eb.prototype.oc=function(){return this.da};Eb.prototype.toString=function(){return"SafeHtml{"+this.da+"}"};var Fb=function(a){if(a instanceof Eb&&a.constructor===Eb&&a.Bd===Db)return a.da;ya("expected object of type SafeHtml, got '"+a+"' of type "+ca(a));return"type_error:SafeHtml"},Db={};Eb.prototype.fe=function(a){this.da=a;return this};var Gb=function(a,b){var c;c=b instanceof A?b:Cb(b);a.href=zb(c)};var Hb=function(a){Hb[" "](a);return a};Hb[" "]=ba;var Ib=!y||9<=Number(pb),Jb=y&&!z("9");!gb||z("528");fb&&z("1.9b")||y&&z("8")||cb&&z("9.5")||gb&&z("528");fb&&!z("8")||y&&z("9");var Kb=function(){this.ua=this.ua;this.Nb=this.Nb};Kb.prototype.ua=!1;Kb.prototype.isDisposed=function(){return this.ua};Kb.prototype.Ka=function(){if(this.Nb)for(;this.Nb.length;)this.Nb.shift()()};var Lb=function(a,b){this.type=a;this.currentTarget=this.target=b;this.defaultPrevented=this.Sa=!1;this.nd=!0};Lb.prototype.preventDefault=function(){this.defaultPrevented=!0;this.nd=!1};var Mb=function(a,b){Lb.call(this,a?a.type:"");this.relatedTarget=this.currentTarget=this.target=null;this.charCode=this.keyCode=this.button=this.screenY=this.screenX=this.clientY=this.clientX=this.offsetY=this.offsetX=0;this.metaKey=this.shiftKey=this.altKey=this.ctrlKey=!1;this.Cb=this.state=null;a&&this.init(a,b)};q(Mb,Lb);
+Mb.prototype.init=function(a,b){var c=this.type=a.type,d=a.changedTouches?a.changedTouches[0]:null;this.target=a.target||a.srcElement;this.currentTarget=b;var e=a.relatedTarget;if(e){if(fb){var f;a:{try{Hb(e.nodeName);f=!0;break a}catch(g){}f=!1}f||(e=null)}}else"mouseover"==c?e=a.fromElement:"mouseout"==c&&(e=a.toElement);this.relatedTarget=e;null===d?(this.offsetX=gb||void 0!==a.offsetX?a.offsetX:a.layerX,this.offsetY=gb||void 0!==a.offsetY?a.offsetY:a.layerY,this.clientX=void 0!==a.clientX?a.clientX:
+a.pageX,this.clientY=void 0!==a.clientY?a.clientY:a.pageY,this.screenX=a.screenX||0,this.screenY=a.screenY||0):(this.clientX=void 0!==d.clientX?d.clientX:d.pageX,this.clientY=void 0!==d.clientY?d.clientY:d.pageY,this.screenX=d.screenX||0,this.screenY=d.screenY||0);this.button=a.button;this.keyCode=a.keyCode||0;this.charCode=a.charCode||("keypress"==c?a.keyCode:0);this.ctrlKey=a.ctrlKey;this.altKey=a.altKey;this.shiftKey=a.shiftKey;this.metaKey=a.metaKey;this.state=a.state;this.Cb=a;a.defaultPrevented&&
+this.preventDefault()};Mb.prototype.preventDefault=function(){Mb.Gc.preventDefault.call(this);var a=this.Cb;if(a.preventDefault)a.preventDefault();else if(a.returnValue=!1,Jb)try{if(a.ctrlKey||112<=a.keyCode&&123>=a.keyCode)a.keyCode=-1}catch(b){}};var Nb="closure_listenable_"+(1E6*Math.random()|0),Ob=0;var Pb=function(a,b,c,d,e){this.listener=a;this.Pb=null;this.src=b;this.type=c;this.zb=!!d;this.Ib=e;this.key=++Ob;this.Va=this.yb=!1},Qb=function(a){a.Va=!0;a.listener=null;a.Pb=null;a.src=null;a.Ib=null};var Rb=function(a){this.src=a;this.u={};this.xb=0};Rb.prototype.add=function(a,b,c,d,e){var f=a.toString();a=this.u[f];a||(a=this.u[f]=[],this.xb++);var g=Sb(a,b,d,e);-1<g?(b=a[g],c||(b.yb=!1)):(b=new Pb(b,this.src,f,!!d,e),b.yb=c,a.push(b));return b};Rb.prototype.remove=function(a,b,c,d){a=a.toString();if(!(a in this.u))return!1;var e=this.u[a];b=Sb(e,b,c,d);return-1<b?(Qb(e[b]),Ja(e,b),0==e.length&&(delete this.u[a],this.xb--),!0):!1};
+var Tb=function(a,b){var c=b.type;c in a.u&&Ka(a.u[c],b)&&(Qb(b),0==a.u[c].length&&(delete a.u[c],a.xb--))};Rb.prototype.nc=function(a,b,c,d){a=this.u[a.toString()];var e=-1;a&&(e=Sb(a,b,c,d));return-1<e?a[e]:null};var Sb=function(a,b,c,d){for(var e=0;e<a.length;++e){var f=a[e];if(!f.Va&&f.listener==b&&f.zb==!!c&&f.Ib==d)return e}return-1};var Ub="closure_lm_"+(1E6*Math.random()|0),Vb={},Wb=0,Xb=function(a,b,c,d,e){if(ea(b))for(var f=0;f<b.length;f++)Xb(a,b[f],c,d,e);else c=Yb(c),a&&a[Nb]?a.listen(b,c,d,e):Zb(a,b,c,!1,d,e)},Zb=function(a,b,c,d,e,f){if(!b)throw Error("Invalid event type");var g=!!e,k=$b(a);k||(a[Ub]=k=new Rb(a));c=k.add(b,c,d,e,f);if(!c.Pb){d=ac();c.Pb=d;d.src=a;d.listener=c;if(a.addEventListener)a.addEventListener(b.toString(),d,g);else if(a.attachEvent)a.attachEvent(bc(b.toString()),d);else throw Error("addEventListener and attachEvent are unavailable.");
+Wb++}},ac=function(){var a=cc,b=Ib?function(c){return a.call(b.src,b.listener,c)}:function(c){c=a.call(b.src,b.listener,c);if(!c)return c};return b},dc=function(a,b,c,d,e){if(ea(b))for(var f=0;f<b.length;f++)dc(a,b[f],c,d,e);else c=Yb(c),a&&a[Nb]?ec(a,b,c,d,e):Zb(a,b,c,!0,d,e)},fc=function(a,b,c,d,e){if(ea(b))for(var f=0;f<b.length;f++)fc(a,b[f],c,d,e);else c=Yb(c),a&&a[Nb]?a.T.remove(String(b),c,d,e):a&&(a=$b(a))&&(b=a.nc(b,c,!!d,e))&&gc(b)},gc=function(a){if(!ga(a)&&a&&!a.Va){var b=a.src;if(b&&
+b[Nb])Tb(b.T,a);else{var c=a.type,d=a.Pb;b.removeEventListener?b.removeEventListener(c,d,a.zb):b.detachEvent&&b.detachEvent(bc(c),d);Wb--;(c=$b(b))?(Tb(c,a),0==c.xb&&(c.src=null,b[Ub]=null)):Qb(a)}}},bc=function(a){return a in Vb?Vb[a]:Vb[a]="on"+a},ic=function(a,b,c,d){var e=!0;if(a=$b(a))if(b=a.u[b.toString()])for(b=b.concat(),a=0;a<b.length;a++){var f=b[a];f&&f.zb==c&&!f.Va&&(f=hc(f,d),e=e&&!1!==f)}return e},hc=function(a,b){var c=a.listener,d=a.Ib||a.src;a.yb&&gc(a);return c.call(d,b)},cc=function(a,
+b){if(a.Va)return!0;if(!Ib){var c;if(!(c=b))a:{c=["window","event"];for(var d=l,e;e=c.shift();)if(null!=d[e])d=d[e];else{c=null;break a}c=d}e=c;c=new Mb(e,this);d=!0;if(!(0>e.keyCode||void 0!=e.returnValue)){a:{var f=!1;if(0==e.keyCode)try{e.keyCode=-1;break a}catch(t){f=!0}if(f||void 0==e.returnValue)e.returnValue=!0}e=[];for(f=c.currentTarget;f;f=f.parentNode)e.push(f);for(var f=a.type,g=e.length-1;!c.Sa&&0<=g;g--){c.currentTarget=e[g];var k=ic(e[g],f,!0,c),d=d&&k}for(g=0;!c.Sa&&g<e.length;g++)c.currentTarget=
+e[g],k=ic(e[g],f,!1,c),d=d&&k}return d}return hc(a,new Mb(b,this))},$b=function(a){a=a[Ub];return a instanceof Rb?a:null},jc="__closure_events_fn_"+(1E9*Math.random()>>>0),Yb=function(a){v(a,"Listener can not be null.");if(n(a))return a;v(a.handleEvent,"An object listener must have handleEvent method.");a[jc]||(a[jc]=function(b){return a.handleEvent(b)});return a[jc]};var kc=/^[+a-zA-Z0-9_.!#$%&'*\/=?^`{|}~-]+@([a-zA-Z0-9-]+\.)+[a-zA-Z0-9]{2,63}$/;var lc=function(a){a=String(a);if(/^\s*$/.test(a)?0:/^[\],:{}\s\u2028\u2029]*$/.test(a.replace(/\\["\\\/bfnrtu]/g,"@").replace(/(?:"[^"\\\n\r\u2028\u2029\x00-\x08\x0a-\x1f]*"|true|false|null|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)[\s\u2028\u2029]*(?=:|,|]|}|$)/g,"]").replace(/(?:^|:|,)(?:[\s\u2028\u2029]*\[)+/g,"")))try{return eval("("+a+")")}catch(b){}throw Error("Invalid JSON string: "+a);},oc=function(a){var b=[];mc(new nc,a,b);return b.join("")},nc=function(){this.Sb=void 0},mc=function(a,b,c){if(null==
+b)c.push("null");else{if("object"==typeof b){if(ea(b)){var d=b;b=d.length;c.push("[");for(var e="",f=0;f<b;f++)c.push(e),e=d[f],mc(a,a.Sb?a.Sb.call(d,String(f),e):e,c),e=",";c.push("]");return}if(b instanceof String||b instanceof Number||b instanceof Boolean)b=b.valueOf();else{c.push("{");f="";for(d in b)Object.prototype.hasOwnProperty.call(b,d)&&(e=b[d],"function"!=typeof e&&(c.push(f),pc(d,c),c.push(":"),mc(a,a.Sb?a.Sb.call(b,d,e):e,c),f=","));c.push("}");return}}switch(typeof b){case "string":pc(b,
+c);break;case "number":c.push(isFinite(b)&&!isNaN(b)?String(b):"null");break;case "boolean":c.push(String(b));break;case "function":c.push("null");break;default:throw Error("Unknown type: "+typeof b);}}},qc={'"':'\\"',"\\":"\\\\","/":"\\/","\b":"\\b","\f":"\\f","\n":"\\n","\r":"\\r","\t":"\\t","\x0B":"\\u000b"},rc=/\uffff/.test("\uffff")?/[\\\"\x00-\x1f\x7f-\uffff]/g:/[\\\"\x00-\x1f\x7f-\xff]/g,pc=function(a,b){b.push('"',a.replace(rc,function(a){var b=qc[a];b||(b="\\u"+(a.charCodeAt(0)|65536).toString(16).substr(1),
+qc[a]=b);return b}),'"')};var sc=function(){};sc.prototype.Jc=null;var tc=function(a){return a.Jc||(a.Jc=a.ad())};var uc,vc=function(){};q(vc,sc);vc.prototype.hc=function(){var a=wc(this);return a?new ActiveXObject(a):new XMLHttpRequest};vc.prototype.ad=function(){var a={};wc(this)&&(a[0]=!0,a[1]=!0);return a};
+var wc=function(a){if(!a.Xc&&"undefined"==typeof XMLHttpRequest&&"undefined"!=typeof ActiveXObject){for(var b=["MSXML2.XMLHTTP.6.0","MSXML2.XMLHTTP.3.0","MSXML2.XMLHTTP","Microsoft.XMLHTTP"],c=0;c<b.length;c++){var d=b[c];try{return new ActiveXObject(d),a.Xc=d}catch(e){}}throw Error("Could not create ActiveXObject. ActiveX might be disabled, or MSXML might not be installed");}return a.Xc};uc=new vc;var xc=function(){};q(xc,sc);xc.prototype.hc=function(){var a=new XMLHttpRequest;if("withCredentials"in a)return a;if("undefined"!=typeof XDomainRequest)return new yc;throw Error("Unsupported browser");};xc.prototype.ad=function(){return{}};
+var yc=function(){this.ia=new XDomainRequest;this.readyState=0;this.responseText=this.onreadystatechange=null;this.status=-1;this.statusText=this.responseXML=null;this.ia.onload=p(this.Ud,this);this.ia.onerror=p(this.Vc,this);this.ia.onprogress=p(this.Vd,this);this.ia.ontimeout=p(this.Wd,this)};h=yc.prototype;h.open=function(a,b,c){if(null!=c&&!c)throw Error("Only async requests are supported.");this.ia.open(a,b)};
+h.send=function(a){if(a)if("string"==typeof a)this.ia.send(a);else throw Error("Only string data is supported");else this.ia.send()};h.abort=function(){this.ia.abort()};h.setRequestHeader=function(){};h.Ud=function(){this.status=200;this.responseText=this.ia.responseText;zc(this,4)};h.Vc=function(){this.status=500;this.responseText=null;zc(this,4)};h.Wd=function(){this.Vc()};h.Vd=function(){this.status=200;zc(this,1)};var zc=function(a,b){a.readyState=b;if(a.onreadystatechange)a.onreadystatechange()};var B=function(a,b){this.i=[];this.h=b;for(var c=!0,d=a.length-1;0<=d;d--){var e=a[d]|0;c&&e==b||(this.i[d]=e,c=!1)}},Ac={},Bc=function(a){if(-128<=a&&128>a){var b=Ac[a];if(b)return b}b=new B([a|0],0>a?-1:0);-128<=a&&128>a&&(Ac[a]=b);return b},E=function(a){if(isNaN(a)||!isFinite(a))return C;if(0>a)return D(E(-a));for(var b=[],c=1,d=0;a>=c;d++)b[d]=a/c|0,c*=4294967296;return new B(b,0)},Cc=function(a,b){if(0==a.length)throw Error("number format error: empty string");var c=b||10;if(2>c||36<c)throw Error("radix out of range: "+
+c);if("-"==a.charAt(0))return D(Cc(a.substring(1),c));if(0<=a.indexOf("-"))throw Error('number format error: interior "-" character');for(var d=E(Math.pow(c,8)),e=C,f=0;f<a.length;f+=8){var g=Math.min(8,a.length-f),k=parseInt(a.substring(f,f+g),c);8>g?(g=E(Math.pow(c,g)),e=e.multiply(g).add(E(k))):(e=e.multiply(d),e=e.add(E(k)))}return e},C=Bc(0),Dc=Bc(1),Ec=Bc(16777216),Fc=function(a){if(-1==a.h)return-Fc(D(a));for(var b=0,c=1,d=0;d<a.i.length;d++)b+=Gc(a,d)*c,c*=4294967296;return b};
+B.prototype.toString=function(a){a=a||10;if(2>a||36<a)throw Error("radix out of range: "+a);if(F(this))return"0";if(-1==this.h)return"-"+D(this).toString(a);for(var b=E(Math.pow(a,6)),c=this,d="";;){var e=Hc(c,b),c=Ic(c,e.multiply(b)),f=((0<c.i.length?c.i[0]:c.h)>>>0).toString(a),c=e;if(F(c))return f+d;for(;6>f.length;)f="0"+f;d=""+f+d}};
+var G=function(a,b){return 0>b?0:b<a.i.length?a.i[b]:a.h},Gc=function(a,b){var c=G(a,b);return 0<=c?c:4294967296+c},F=function(a){if(0!=a.h)return!1;for(var b=0;b<a.i.length;b++)if(0!=a.i[b])return!1;return!0};B.prototype.Bb=function(a){if(this.h!=a.h)return!1;for(var b=Math.max(this.i.length,a.i.length),c=0;c<b;c++)if(G(this,c)!=G(a,c))return!1;return!0};B.prototype.compare=function(a){a=Ic(this,a);return-1==a.h?-1:F(a)?0:1};
+var D=function(a){for(var b=a.i.length,c=[],d=0;d<b;d++)c[d]=~a.i[d];return(new B(c,~a.h)).add(Dc)};B.prototype.add=function(a){for(var b=Math.max(this.i.length,a.i.length),c=[],d=0,e=0;e<=b;e++){var f=d+(G(this,e)&65535)+(G(a,e)&65535),g=(f>>>16)+(G(this,e)>>>16)+(G(a,e)>>>16),d=g>>>16,f=f&65535,g=g&65535;c[e]=g<<16|f}return new B(c,c[c.length-1]&-2147483648?-1:0)};var Ic=function(a,b){return a.add(D(b))};
+B.prototype.multiply=function(a){if(F(this)||F(a))return C;if(-1==this.h)return-1==a.h?D(this).multiply(D(a)):D(D(this).multiply(a));if(-1==a.h)return D(this.multiply(D(a)));if(0>this.compare(Ec)&&0>a.compare(Ec))return E(Fc(this)*Fc(a));for(var b=this.i.length+a.i.length,c=[],d=0;d<2*b;d++)c[d]=0;for(d=0;d<this.i.length;d++)for(var e=0;e<a.i.length;e++){var f=G(this,d)>>>16,g=G(this,d)&65535,k=G(a,e)>>>16,t=G(a,e)&65535;c[2*d+2*e]+=g*t;Jc(c,2*d+2*e);c[2*d+2*e+1]+=f*t;Jc(c,2*d+2*e+1);c[2*d+2*e+1]+=
+g*k;Jc(c,2*d+2*e+1);c[2*d+2*e+2]+=f*k;Jc(c,2*d+2*e+2)}for(d=0;d<b;d++)c[d]=c[2*d+1]<<16|c[2*d];for(d=b;d<2*b;d++)c[d]=0;return new B(c,0)};
+var Jc=function(a,b){for(;(a[b]&65535)!=a[b];)a[b+1]+=a[b]>>>16,a[b]&=65535},Hc=function(a,b){if(F(b))throw Error("division by zero");if(F(a))return C;if(-1==a.h)return-1==b.h?Hc(D(a),D(b)):D(Hc(D(a),b));if(-1==b.h)return D(Hc(a,D(b)));if(30<a.i.length){if(-1==a.h||-1==b.h)throw Error("slowDivide_ only works with positive integers.");for(var c=Dc,d=b;0>=d.compare(a);)c=c.shiftLeft(1),d=d.shiftLeft(1);for(var e=Kc(c,1),f=Kc(d,1),g,d=Kc(d,2),c=Kc(c,2);!F(d);)g=f.add(d),0>=g.compare(a)&&(e=e.add(c),
+f=g),d=Kc(d,1),c=Kc(c,1);return e}c=C;for(d=a;0<=d.compare(b);){e=Math.max(1,Math.floor(Fc(d)/Fc(b)));f=Math.ceil(Math.log(e)/Math.LN2);f=48>=f?1:Math.pow(2,f-48);g=E(e);for(var k=g.multiply(b);-1==k.h||0<k.compare(d);)e-=f,g=E(e),k=g.multiply(b);F(g)&&(g=Dc);c=c.add(g);d=Ic(d,k)}return c},Lc=function(a,b){for(var c=Math.max(a.i.length,b.i.length),d=[],e=0;e<c;e++)d[e]=G(a,e)|G(b,e);return new B(d,a.h|b.h)};
+B.prototype.shiftLeft=function(a){var b=a>>5;a%=32;for(var c=this.i.length+b+(0<a?1:0),d=[],e=0;e<c;e++)d[e]=0<a?G(this,e-b)<<a|G(this,e-b-1)>>>32-a:G(this,e-b);return new B(d,this.h)};var Kc=function(a,b){for(var c=b>>5,d=b%32,e=a.i.length-c,f=[],g=0;g<e;g++)f[g]=0<d?G(a,g+c)>>>d|G(a,g+c+1)<<32-d:G(a,g+c);return new B(f,a.h)};var Mc=function(a,b){this.jb=a;this.ha=b};Mc.prototype.Bb=function(a){return this.ha==a.ha&&this.jb.Bb(Xa(a.jb))};
+var Pc=function(a){try{var b;if(b=0==a.lastIndexOf("[",0)){var c=a.length-1;b=0<=c&&a.indexOf("]",c)==c}return b?new Nc(a.substring(1,a.length-1)):new Oc(a)}catch(d){return null}},Oc=function(a){var b=C;if(a instanceof B){if(0!=a.h||0>a.compare(C)||0<a.compare(Qc))throw Error("The address does not look like an IPv4.");b=Xa(a)}else{if(!Rc.test(a))throw Error(a+" does not look like an IPv4 address.");var c=a.split(".");if(4!=c.length)throw Error(a+" does not look like an IPv4 address.");for(var d=0;d<
+c.length;d++){var e;e=c[d];var f=Number(e);e=0==f&&/^[\s\xa0]*$/.test(e)?NaN:f;if(isNaN(e)||0>e||255<e||1!=c[d].length&&0==c[d].lastIndexOf("0",0))throw Error("In "+a+", octet "+d+" is not valid");e=E(e);b=Lc(b.shiftLeft(8),e)}}Mc.call(this,b,4)};q(Oc,Mc);var Rc=/^[0-9.]*$/,Qc=Ic(Dc.shiftLeft(32),Dc);Oc.prototype.toString=function(){if(this.ya)return this.ya;for(var a=Gc(this.jb,0),b=[],c=3;0<=c;c--)b[c]=String(a&255),a>>>=8;return this.ya=b.join(".")};
+var Nc=function(a){var b=C;if(a instanceof B){if(0!=a.h||0>a.compare(C)||0<a.compare(Sc))throw Error("The address does not look like a valid IPv6.");b=Xa(a)}else{if(!Tc.test(a))throw Error(a+" is not a valid IPv6 address.");var c=a.split(":");if(-1!=c[c.length-1].indexOf(".")){a=Gc(Xa((new Oc(c[c.length-1])).jb),0);var d=[];d.push((a>>>16&65535).toString(16));d.push((a&65535).toString(16));Ja(c,c.length-1);Pa(c,d);a=c.join(":")}d=a.split("::");if(2<d.length||1==d.length&&8!=c.length)throw Error(a+
+" is not a valid IPv6 address.");if(1<d.length){c=d[0].split(":");d=d[1].split(":");1==c.length&&""==c[0]&&(c=[]);1==d.length&&""==d[0]&&(d=[]);var e=8-(c.length+d.length);if(1>e)c=[];else{for(var f=[],g=0;g<e;g++)f[g]="0";c=Na(c,f,d)}}if(8!=c.length)throw Error(a+" is not a valid IPv6 address");for(d=0;d<c.length;d++){e=Cc(c[d],16);if(0>e.compare(C)||0<e.compare(Uc))throw Error(c[d]+" in "+a+" is not a valid hextet.");b=Lc(b.shiftLeft(16),e)}}Mc.call(this,b,6)};q(Nc,Mc);
+var Tc=/^([a-fA-F0-9]*:){2}[a-fA-F0-9:.]*$/,Uc=Bc(65535),Sc=Ic(Dc.shiftLeft(128),Dc);Nc.prototype.toString=function(){if(this.ya)return this.ya;for(var a=[],b=3;0<=b;b--){var c=Gc(this.jb,b),d=c&65535;a.push((c>>>16).toString(16));a.push(d.toString(16))}for(var c=b=-1,e=d=0,f=0;f<a.length;f++)"0"==a[f]?(e++,-1==c&&(c=f),e>d&&(d=e,b=c)):(c=-1,e=0);0<d&&(b+d==a.length&&a.push(""),a.splice(b,d,""),0==b&&(a=[""].concat(a)));return this.ya=a.join(":")};!fb&&!y||y&&9<=Number(pb)||fb&&z("1.9.1");y&&z("9");var Wc=function(a,b){Qa(b,function(b,d){"style"==d?a.style.cssText=b:"class"==d?a.className=b:"for"==d?a.htmlFor=b:Vc.hasOwnProperty(d)?a.setAttribute(Vc[d],b):0==d.lastIndexOf("aria-",0)||0==d.lastIndexOf("data-",0)?a.setAttribute(d,b):a[d]=b})},Vc={cellpadding:"cellPadding",cellspacing:"cellSpacing",colspan:"colSpan",frameborder:"frameBorder",height:"height",maxlength:"maxLength",nonce:"nonce",role:"role",rowspan:"rowSpan",type:"type",usemap:"useMap",valign:"vAlign",width:"width"};var Xc=function(a,b,c){this.he=c;this.Jd=a;this.re=b;this.Mb=0;this.Jb=null};Xc.prototype.get=function(){var a;0<this.Mb?(this.Mb--,a=this.Jb,this.Jb=a.next,a.next=null):a=this.Jd();return a};Xc.prototype.put=function(a){this.re(a);this.Mb<this.he&&(this.Mb++,a.next=this.Jb,this.Jb=a)};var Yc=function(a){l.setTimeout(function(){throw a;},0)},Zc,$c=function(){var a=l.MessageChannel;"undefined"===typeof a&&"undefined"!==typeof window&&window.postMessage&&window.addEventListener&&!x("Presto")&&(a=function(){var a=document.createElement("IFRAME");a.style.display="none";a.src="";document.documentElement.appendChild(a);var b=a.contentWindow,a=b.document;a.open();a.write("");a.close();var c="callImmediate"+Math.random(),d="file:"==b.location.protocol?"*":b.location.protocol+"//"+b.location.host,
+a=p(function(a){if(("*"==d||a.origin==d)&&a.data==c)this.port1.onmessage()},this);b.addEventListener("message",a,!1);this.port1={};this.port2={postMessage:function(){b.postMessage(c,d)}}});if("undefined"!==typeof a&&!x("Trident")&&!x("MSIE")){var b=new a,c={},d=c;b.port1.onmessage=function(){if(void 0!==c.next){c=c.next;var a=c.Nc;c.Nc=null;a()}};return function(a){d.next={Nc:a};d=d.next;b.port2.postMessage(0)}}return"undefined"!==typeof document&&"onreadystatechange"in document.createElement("SCRIPT")?
+function(a){var b=document.createElement("SCRIPT");b.onreadystatechange=function(){b.onreadystatechange=null;b.parentNode.removeChild(b);b=null;a();a=null};document.documentElement.appendChild(b)}:function(a){l.setTimeout(a,0)}};var ad=function(){this.ac=this.Ga=null},cd=new Xc(function(){return new bd},function(a){a.reset()},100);ad.prototype.add=function(a,b){var c=cd.get();c.set(a,b);this.ac?this.ac.next=c:(v(!this.Ga),this.Ga=c);this.ac=c};ad.prototype.remove=function(){var a=null;this.Ga&&(a=this.Ga,this.Ga=this.Ga.next,this.Ga||(this.ac=null),a.next=null);return a};var bd=function(){this.next=this.scope=this.mc=null};bd.prototype.set=function(a,b){this.mc=a;this.scope=b;this.next=null};
+bd.prototype.reset=function(){this.next=this.scope=this.mc=null};var hd=function(a,b){dd||ed();fd||(dd(),fd=!0);gd.add(a,b)},dd,ed=function(){if(l.Promise&&l.Promise.resolve){var a=l.Promise.resolve(void 0);dd=function(){a.then(id)}}else dd=function(){var a=id;!n(l.setImmediate)||l.Window&&l.Window.prototype&&!x("Edge")&&l.Window.prototype.setImmediate==l.setImmediate?(Zc||(Zc=$c()),Zc(a)):l.setImmediate(a)}},fd=!1,gd=new ad,id=function(){for(var a;a=gd.remove();){try{a.mc.call(a.scope)}catch(b){Yc(b)}cd.put(a)}fd=!1};var jd=function(a){a.prototype.then=a.prototype.then;a.prototype.$goog_Thenable=!0},kd=function(a){if(!a)return!1;try{return!!a.$goog_Thenable}catch(b){return!1}};var H=function(a,b){this.A=0;this.fa=void 0;this.Ja=this.aa=this.m=null;this.Hb=this.lc=!1;if(a!=ba)try{var c=this;a.call(b,function(a){ld(c,2,a)},function(a){if(!(a instanceof md))try{if(a instanceof Error)throw a;throw Error("Promise rejected.");}catch(b){}ld(c,3,a)})}catch(d){ld(this,3,d)}},nd=function(){this.next=this.context=this.Pa=this.za=this.child=null;this.bb=!1};nd.prototype.reset=function(){this.context=this.Pa=this.za=this.child=null;this.bb=!1};
+var od=new Xc(function(){return new nd},function(a){a.reset()},100),pd=function(a,b,c){var d=od.get();d.za=a;d.Pa=b;d.context=c;return d},I=function(a){if(a instanceof H)return a;var b=new H(ba);ld(b,2,a);return b},J=function(a){return new H(function(b,c){c(a)})},rd=function(a,b,c){qd(a,b,c,null)||hd(ka(b,a))},sd=function(a){return new H(function(b){var c=a.length,d=[];if(c)for(var e=function(a,e,f){c--;d[a]=e?{Sd:!0,value:f}:{Sd:!1,reason:f};0==c&&b(d)},f=0,g;f<a.length;f++)g=a[f],rd(g,ka(e,f,!0),
+ka(e,f,!1));else b(d)})};H.prototype.then=function(a,b,c){null!=a&&Ba(a,"opt_onFulfilled should be a function.");null!=b&&Ba(b,"opt_onRejected should be a function. Did you pass opt_context as the second argument instead of the third?");return td(this,n(a)?a:null,n(b)?b:null,c)};jd(H);var vd=function(a,b){var c=pd(b,b,void 0);c.bb=!0;ud(a,c);return a};H.prototype.N=function(a,b){return td(this,null,a,b)};H.prototype.cancel=function(a){0==this.A&&hd(function(){var b=new md(a);wd(this,b)},this)};
+var wd=function(a,b){if(0==a.A)if(a.m){var c=a.m;if(c.aa){for(var d=0,e=null,f=null,g=c.aa;g&&(g.bb||(d++,g.child==a&&(e=g),!(e&&1<d)));g=g.next)e||(f=g);e&&(0==c.A&&1==d?wd(c,b):(f?(d=f,v(c.aa),v(null!=d),d.next==c.Ja&&(c.Ja=d),d.next=d.next.next):xd(c),yd(c,e,3,b)))}a.m=null}else ld(a,3,b)},ud=function(a,b){a.aa||2!=a.A&&3!=a.A||zd(a);v(null!=b.za);a.Ja?a.Ja.next=b:a.aa=b;a.Ja=b},td=function(a,b,c,d){var e=pd(null,null,null);e.child=new H(function(a,g){e.za=b?function(c){try{var e=b.call(d,c);a(e)}catch(Y){g(Y)}}:
+a;e.Pa=c?function(b){try{var e=c.call(d,b);void 0===e&&b instanceof md?g(b):a(e)}catch(Y){g(Y)}}:g});e.child.m=a;ud(a,e);return e.child};H.prototype.Be=function(a){v(1==this.A);this.A=0;ld(this,2,a)};H.prototype.Ce=function(a){v(1==this.A);this.A=0;ld(this,3,a)};
+var ld=function(a,b,c){0==a.A&&(a===c&&(b=3,c=new TypeError("Promise cannot resolve to itself")),a.A=1,qd(c,a.Be,a.Ce,a)||(a.fa=c,a.A=b,a.m=null,zd(a),3!=b||c instanceof md||Ad(a,c)))},qd=function(a,b,c,d){if(a instanceof H)return null!=b&&Ba(b,"opt_onFulfilled should be a function."),null!=c&&Ba(c,"opt_onRejected should be a function. Did you pass opt_context as the second argument instead of the third?"),ud(a,pd(b||ba,c||null,d)),!0;if(kd(a))return a.then(b,c,d),!0;if(ha(a))try{var e=a.then;if(n(e))return Bd(a,
+e,b,c,d),!0}catch(f){return c.call(d,f),!0}return!1},Bd=function(a,b,c,d,e){var f=!1,g=function(a){f||(f=!0,c.call(e,a))},k=function(a){f||(f=!0,d.call(e,a))};try{b.call(a,g,k)}catch(t){k(t)}},zd=function(a){a.lc||(a.lc=!0,hd(a.Nd,a))},xd=function(a){var b=null;a.aa&&(b=a.aa,a.aa=b.next,b.next=null);a.aa||(a.Ja=null);null!=b&&v(null!=b.za);return b};H.prototype.Nd=function(){for(var a;a=xd(this);)yd(this,a,this.A,this.fa);this.lc=!1};
+var yd=function(a,b,c,d){if(3==c&&b.Pa&&!b.bb)for(;a&&a.Hb;a=a.m)a.Hb=!1;if(b.child)b.child.m=null,Cd(b,c,d);else try{b.bb?b.za.call(b.context):Cd(b,c,d)}catch(e){Dd.call(null,e)}od.put(b)},Cd=function(a,b,c){2==b?a.za.call(a.context,c):a.Pa&&a.Pa.call(a.context,c)},Ad=function(a,b){a.Hb=!0;hd(function(){a.Hb&&Dd.call(null,b)})},Dd=Yc,md=function(a){r.call(this,a)};q(md,r);md.prototype.name="cancel";/*
+ Portions of this code are from MochiKit, received by
+ The Closure Authors under the MIT license. All other code is Copyright
+ 2005-2009 The Closure Authors. All Rights Reserved.
+*/
+var Ed=function(a,b){this.Tb=[];this.gd=a;this.Pc=b||null;this.gb=this.Ma=!1;this.fa=void 0;this.Ec=this.Ic=this.ec=!1;this.Zb=0;this.m=null;this.fc=0};Ed.prototype.cancel=function(a){if(this.Ma)this.fa instanceof Ed&&this.fa.cancel();else{if(this.m){var b=this.m;delete this.m;a?b.cancel(a):(b.fc--,0>=b.fc&&b.cancel())}this.gd?this.gd.call(this.Pc,this):this.Ec=!0;this.Ma||Fd(this,new Gd)}};Ed.prototype.Oc=function(a,b){this.ec=!1;Hd(this,a,b)};
+var Hd=function(a,b,c){a.Ma=!0;a.fa=c;a.gb=!b;Id(a)},Kd=function(a){if(a.Ma){if(!a.Ec)throw new Jd;a.Ec=!1}};Ed.prototype.callback=function(a){Kd(this);Ld(a);Hd(this,!0,a)};var Fd=function(a,b){Kd(a);Ld(b);Hd(a,!1,b)},Ld=function(a){v(!(a instanceof Ed),"An execution sequence may not be initiated with a blocking Deferred.")},Nd=function(a,b){Md(a,null,b,void 0)},Md=function(a,b,c,d){v(!a.Ic,"Blocking Deferreds can not be re-used");a.Tb.push([b,c,d]);a.Ma&&Id(a)};
+Ed.prototype.then=function(a,b,c){var d,e,f=new H(function(a,b){d=a;e=b});Md(this,d,function(a){a instanceof Gd?f.cancel():e(a)});return f.then(a,b,c)};jd(Ed);
+var Od=function(a){return Fa(a.Tb,function(a){return n(a[1])})},Id=function(a){if(a.Zb&&a.Ma&&Od(a)){var b=a.Zb,c=Pd[b];c&&(l.clearTimeout(c.hb),delete Pd[b]);a.Zb=0}a.m&&(a.m.fc--,delete a.m);for(var b=a.fa,d=c=!1;a.Tb.length&&!a.ec;){var e=a.Tb.shift(),f=e[0],g=e[1],e=e[2];if(f=a.gb?g:f)try{var k=f.call(e||a.Pc,b);void 0!==k&&(a.gb=a.gb&&(k==b||k instanceof Error),a.fa=b=k);if(kd(b)||"function"===typeof l.Promise&&b instanceof l.Promise)d=!0,a.ec=!0}catch(t){b=t,a.gb=!0,Od(a)||(c=!0)}}a.fa=b;d&&
+(k=p(a.Oc,a,!0),d=p(a.Oc,a,!1),b instanceof Ed?(Md(b,k,d),b.Ic=!0):b.then(k,d));c&&(b=new Qd(b),Pd[b.hb]=b,a.Zb=b.hb)},Jd=function(){r.call(this)};q(Jd,r);Jd.prototype.message="Deferred has already fired";Jd.prototype.name="AlreadyCalledError";var Gd=function(){r.call(this)};q(Gd,r);Gd.prototype.message="Deferred was canceled";Gd.prototype.name="CanceledError";var Qd=function(a){this.hb=l.setTimeout(p(this.Ae,this),0);this.F=a};
+Qd.prototype.Ae=function(){v(Pd[this.hb],"Cannot throw an error that is not scheduled.");delete Pd[this.hb];throw this.F;};var Pd={};var Vd=function(a){var b={},c=b.document||document,d=document.createElement("SCRIPT"),e={od:d,wb:void 0},f=new Ed(Rd,e),g=null,k=null!=b.timeout?b.timeout:5E3;0<k&&(g=window.setTimeout(function(){Sd(d,!0);Fd(f,new Td(1,"Timeout reached for loading script "+a))},k),e.wb=g);d.onload=d.onreadystatechange=function(){d.readyState&&"loaded"!=d.readyState&&"complete"!=d.readyState||(Sd(d,b.Ge||!1,g),f.callback(null))};d.onerror=function(){Sd(d,!0,g);Fd(f,new Td(0,"Error while loading script "+a))};e=b.attributes||
+{};Za(e,{type:"text/javascript",charset:"UTF-8",src:a});Wc(d,e);Ud(c).appendChild(d);return f},Ud=function(a){var b=a.getElementsByTagName("HEAD");return b&&0!=b.length?b[0]:a.documentElement},Rd=function(){if(this&&this.od){var a=this.od;a&&"SCRIPT"==a.tagName&&Sd(a,!0,this.wb)}},Sd=function(a,b,c){null!=c&&l.clearTimeout(c);a.onload=ba;a.onerror=ba;a.onreadystatechange=ba;b&&window.setTimeout(function(){a&&a.parentNode&&a.parentNode.removeChild(a)},0)},Td=function(a,b){var c="Jsloader error (code #"+
+a+")";b&&(c+=": "+b);r.call(this,c);this.code=a};q(Td,r);var Wd=function(){Kb.call(this);this.T=new Rb(this);this.Fd=this;this.uc=null};q(Wd,Kb);Wd.prototype[Nb]=!0;h=Wd.prototype;h.addEventListener=function(a,b,c,d){Xb(this,a,b,c,d)};h.removeEventListener=function(a,b,c,d){fc(this,a,b,c,d)};
+h.dispatchEvent=function(a){Xd(this);var b,c=this.uc;if(c){b=[];for(var d=1;c;c=c.uc)b.push(c),v(1E3>++d,"infinite loop")}c=this.Fd;d=a.type||a;if(m(a))a=new Lb(a,c);else if(a instanceof Lb)a.target=a.target||c;else{var e=a;a=new Lb(d,c);Za(a,e)}var e=!0,f;if(b)for(var g=b.length-1;!a.Sa&&0<=g;g--)f=a.currentTarget=b[g],e=Yd(f,d,!0,a)&&e;a.Sa||(f=a.currentTarget=c,e=Yd(f,d,!0,a)&&e,a.Sa||(e=Yd(f,d,!1,a)&&e));if(b)for(g=0;!a.Sa&&g<b.length;g++)f=a.currentTarget=b[g],e=Yd(f,d,!1,a)&&e;return e};
+h.Ka=function(){Wd.Gc.Ka.call(this);if(this.T){var a=this.T,b=0,c;for(c in a.u){for(var d=a.u[c],e=0;e<d.length;e++)++b,Qb(d[e]);delete a.u[c];a.xb--}}this.uc=null};h.listen=function(a,b,c,d){Xd(this);return this.T.add(String(a),b,!1,c,d)};
+var ec=function(a,b,c,d,e){a.T.add(String(b),c,!0,d,e)},Yd=function(a,b,c,d){b=a.T.u[String(b)];if(!b)return!0;b=b.concat();for(var e=!0,f=0;f<b.length;++f){var g=b[f];if(g&&!g.Va&&g.zb==c){var k=g.listener,t=g.Ib||g.src;g.yb&&Tb(a.T,g);e=!1!==k.call(t,d)&&e}}return e&&0!=d.nd};Wd.prototype.nc=function(a,b,c,d){return this.T.nc(String(a),b,c,d)};var Xd=function(a){v(a.T,"Event target is not initialized. Did you call the superclass (goog.events.EventTarget) constructor?")};var Zd="StopIteration"in l?l.StopIteration:{message:"StopIteration",stack:""},$d=function(){};$d.prototype.next=function(){throw Zd;};$d.prototype.ab=function(){return this};
+var ae=function(a){if(a instanceof $d)return a;if("function"==typeof a.ab)return a.ab(!1);if(fa(a)){var b=0,c=new $d;c.next=function(){for(;;){if(b>=a.length)throw Zd;if(b in a)return a[b++];b++}};return c}throw Error("Not implemented");},be=function(a,b){if(fa(a))try{w(a,b,void 0)}catch(c){if(c!==Zd)throw c;}else{a=ae(a);try{for(;;)b.call(void 0,a.next(),void 0,a)}catch(c){if(c!==Zd)throw c;}}};var ce=function(a,b){this.U={};this.o=[];this.ha=this.j=0;var c=arguments.length;if(1<c){if(c%2)throw Error("Uneven number of arguments");for(var d=0;d<c;d+=2)this.set(arguments[d],arguments[d+1])}else a&&this.addAll(a)};h=ce.prototype;h.Eb=function(){return this.j};h.O=function(){de(this);for(var a=[],b=0;b<this.o.length;b++)a.push(this.U[this.o[b]]);return a};h.ba=function(){de(this);return this.o.concat()};h.eb=function(a){return ee(this.U,a)};
+h.Bb=function(a,b){if(this===a)return!0;if(this.j!=a.Eb())return!1;var c=b||fe;de(this);for(var d,e=0;d=this.o[e];e++)if(!c(this.get(d),a.get(d)))return!1;return!0};var fe=function(a,b){return a===b};ce.prototype.remove=function(a){return ee(this.U,a)?(delete this.U[a],this.j--,this.ha++,this.o.length>2*this.j&&de(this),!0):!1};
+var de=function(a){if(a.j!=a.o.length){for(var b=0,c=0;b<a.o.length;){var d=a.o[b];ee(a.U,d)&&(a.o[c++]=d);b++}a.o.length=c}if(a.j!=a.o.length){for(var e={},c=b=0;b<a.o.length;)d=a.o[b],ee(e,d)||(a.o[c++]=d,e[d]=1),b++;a.o.length=c}};h=ce.prototype;h.get=function(a,b){return ee(this.U,a)?this.U[a]:b};h.set=function(a,b){ee(this.U,a)||(this.j++,this.o.push(a),this.ha++);this.U[a]=b};
+h.addAll=function(a){var b;a instanceof ce?(b=a.ba(),a=a.O()):(b=Sa(a),a=Ra(a));for(var c=0;c<b.length;c++)this.set(b[c],a[c])};h.forEach=function(a,b){for(var c=this.ba(),d=0;d<c.length;d++){var e=c[d],f=this.get(e);a.call(b,f,e,this)}};h.clone=function(){return new ce(this)};h.ab=function(a){de(this);var b=0,c=this.ha,d=this,e=new $d;e.next=function(){if(c!=d.ha)throw Error("The map has changed since the iterator was created");if(b>=d.o.length)throw Zd;var e=d.o[b++];return a?e:d.U[e]};return e};
+var ee=function(a,b){return Object.prototype.hasOwnProperty.call(a,b)};var ge=function(a){if(a.O&&"function"==typeof a.O)return a.O();if(m(a))return a.split("");if(fa(a)){for(var b=[],c=a.length,d=0;d<c;d++)b.push(a[d]);return b}return Ra(a)},he=function(a){if(a.ba&&"function"==typeof a.ba)return a.ba();if(!a.O||"function"!=typeof a.O){if(fa(a)||m(a)){var b=[];a=a.length;for(var c=0;c<a;c++)b.push(c);return b}return Sa(a)}},ie=function(a,b){if(a.forEach&&"function"==typeof a.forEach)a.forEach(b,void 0);else if(fa(a)||m(a))w(a,b,void 0);else for(var c=he(a),d=ge(a),e=
+d.length,f=0;f<e;f++)b.call(void 0,d[f],c&&c[f],a)};var je=function(a,b,c,d,e){this.reset(a,b,c,d,e)};je.prototype.Rc=null;var ke=0;je.prototype.reset=function(a,b,c,d,e){"number"==typeof e||ke++;d||la();this.mb=a;this.je=b;delete this.Rc};je.prototype.qd=function(a){this.mb=a};var le=function(a){this.ke=a;this.Wc=this.gc=this.mb=this.m=null},me=function(a,b){this.name=a;this.value=b};me.prototype.toString=function(){return this.name};var ne=new me("SEVERE",1E3),oe=new me("CONFIG",700),pe=new me("FINE",500);le.prototype.getParent=function(){return this.m};le.prototype.qd=function(a){this.mb=a};var qe=function(a){if(a.mb)return a.mb;if(a.m)return qe(a.m);ya("Root logger has no level set.");return null};
+le.prototype.log=function(a,b,c){if(a.value>=qe(this).value)for(n(b)&&(b=b()),a=new je(a,String(b),this.ke),c&&(a.Rc=c),c="log:"+a.je,l.console&&(l.console.timeStamp?l.console.timeStamp(c):l.console.markTimeline&&l.console.markTimeline(c)),l.msWriteProfilerMark&&l.msWriteProfilerMark(c),c=this;c;){b=c;var d=a;if(b.Wc)for(var e=0,f;f=b.Wc[e];e++)f(d);c=c.getParent()}};
+var re={},se=null,te=function(a){se||(se=new le(""),re[""]=se,se.qd(oe));var b;if(!(b=re[a])){b=new le(a);var c=a.lastIndexOf("."),d=a.substr(c+1),c=te(a.substr(0,c));c.gc||(c.gc={});c.gc[d]=b;b.m=c;re[a]=b}return b};var K=function(a,b){a&&a.log(pe,b,void 0)};var ue=function(a,b,c){if(n(a))c&&(a=p(a,c));else if(a&&"function"==typeof a.handleEvent)a=p(a.handleEvent,a);else throw Error("Invalid listener argument");return 2147483647<Number(b)?-1:l.setTimeout(a,b||0)},ve=function(a){var b=null;return(new H(function(c,d){b=ue(function(){c(void 0)},a);-1==b&&d(Error("Failed to schedule timer."))})).N(function(a){l.clearTimeout(b);throw a;})};var we=/^(?:([^:/?#.]+):)?(?:\/\/(?:([^/?#]*)@)?([^/#?]*?)(?::([0-9]+))?(?=[/#?]|$))?([^?#]+)?(?:\?([^#]*))?(?:#(.*))?$/,xe=function(a,b){if(a)for(var c=a.split("&"),d=0;d<c.length;d++){var e=c[d].indexOf("="),f,g=null;0<=e?(f=c[d].substring(0,e),g=c[d].substring(e+1)):f=c[d];b(f,g?decodeURIComponent(g.replace(/\+/g," ")):"")}};var L=function(a){Wd.call(this);this.headers=new ce;this.cc=a||null;this.ja=!1;this.bc=this.a=null;this.lb=this.cd=this.Lb="";this.xa=this.rc=this.Kb=this.kc=!1;this.Ya=0;this.Yb=null;this.md="";this.$b=this.qe=this.xd=!1};q(L,Wd);var ye=L.prototype,ze=te("goog.net.XhrIo");ye.K=ze;var Ae=/^https?$/i,Be=["POST","PUT"];
+L.prototype.send=function(a,b,c,d){if(this.a)throw Error("[goog.net.XhrIo] Object is active with another request="+this.Lb+"; newUri="+a);b=b?b.toUpperCase():"GET";this.Lb=a;this.lb="";this.cd=b;this.kc=!1;this.ja=!0;this.a=this.cc?this.cc.hc():uc.hc();this.bc=this.cc?tc(this.cc):tc(uc);this.a.onreadystatechange=p(this.jd,this);this.qe&&"onprogress"in this.a&&(this.a.onprogress=p(function(a){this.hd(a,!0)},this),this.a.upload&&(this.a.upload.onprogress=p(this.hd,this)));try{K(this.K,Ce(this,"Opening Xhr")),
+this.rc=!0,this.a.open(b,String(a),!0),this.rc=!1}catch(f){K(this.K,Ce(this,"Error opening Xhr: "+f.message));this.F(5,f);return}a=c||"";var e=this.headers.clone();d&&ie(d,function(a,b){e.set(b,a)});d=Ha(e.ba());c=l.FormData&&a instanceof l.FormData;!Ia(Be,b)||d||c||e.set("Content-Type","application/x-www-form-urlencoded;charset=utf-8");e.forEach(function(a,b){this.a.setRequestHeader(b,a)},this);this.md&&(this.a.responseType=this.md);"withCredentials"in this.a&&this.a.withCredentials!==this.xd&&(this.a.withCredentials=
+this.xd);try{De(this),0<this.Ya&&(this.$b=Ee(this.a),K(this.K,Ce(this,"Will abort after "+this.Ya+"ms if incomplete, xhr2 "+this.$b)),this.$b?(this.a.timeout=this.Ya,this.a.ontimeout=p(this.wb,this)):this.Yb=ue(this.wb,this.Ya,this)),K(this.K,Ce(this,"Sending request")),this.Kb=!0,this.a.send(a),this.Kb=!1}catch(f){K(this.K,Ce(this,"Send error: "+f.message)),this.F(5,f)}};var Ee=function(a){return y&&z(9)&&ga(a.timeout)&&void 0!==a.ontimeout},Ga=function(a){return"content-type"==a.toLowerCase()};
+L.prototype.wb=function(){"undefined"!=typeof aa&&this.a&&(this.lb="Timed out after "+this.Ya+"ms, aborting",K(this.K,Ce(this,this.lb)),this.dispatchEvent("timeout"),this.abort(8))};L.prototype.F=function(a,b){this.ja=!1;this.a&&(this.xa=!0,this.a.abort(),this.xa=!1);this.lb=b;Fe(this);Ge(this)};var Fe=function(a){a.kc||(a.kc=!0,a.dispatchEvent("complete"),a.dispatchEvent("error"))};
+L.prototype.abort=function(){this.a&&this.ja&&(K(this.K,Ce(this,"Aborting")),this.ja=!1,this.xa=!0,this.a.abort(),this.xa=!1,this.dispatchEvent("complete"),this.dispatchEvent("abort"),Ge(this))};L.prototype.Ka=function(){this.a&&(this.ja&&(this.ja=!1,this.xa=!0,this.a.abort(),this.xa=!1),Ge(this,!0));L.Gc.Ka.call(this)};L.prototype.jd=function(){this.isDisposed()||(this.rc||this.Kb||this.xa?He(this):this.oe())};L.prototype.oe=function(){He(this)};
+var He=function(a){if(a.ja&&"undefined"!=typeof aa)if(a.bc[1]&&4==Ie(a)&&2==Je(a))K(a.K,Ce(a,"Local request error detected and ignored"));else if(a.Kb&&4==Ie(a))ue(a.jd,0,a);else if(a.dispatchEvent("readystatechange"),4==Ie(a)){K(a.K,Ce(a,"Request complete"));a.ja=!1;try{var b=Je(a),c;a:switch(b){case 200:case 201:case 202:case 204:case 206:case 304:case 1223:c=!0;break a;default:c=!1}var d;if(!(d=c)){var e;if(e=0===b){var f=String(a.Lb).match(we)[1]||null;if(!f&&l.self&&l.self.location)var g=l.self.location.protocol,
+f=g.substr(0,g.length-1);e=!Ae.test(f?f.toLowerCase():"")}d=e}if(d)a.dispatchEvent("complete"),a.dispatchEvent("success");else{var k;try{k=2<Ie(a)?a.a.statusText:""}catch(t){K(a.K,"Can not get status: "+t.message),k=""}a.lb=k+" ["+Je(a)+"]";Fe(a)}}finally{Ge(a)}}};L.prototype.hd=function(a,b){v("progress"===a.type,"goog.net.EventType.PROGRESS is of the same type as raw XHR progress.");this.dispatchEvent(Ke(a,"progress"));this.dispatchEvent(Ke(a,b?"downloadprogress":"uploadprogress"))};
+var Ke=function(a,b){return{type:b,lengthComputable:a.lengthComputable,loaded:a.loaded,total:a.total}},Ge=function(a,b){if(a.a){De(a);var c=a.a,d=a.bc[0]?ba:null;a.a=null;a.bc=null;b||a.dispatchEvent("ready");try{c.onreadystatechange=d}catch(e){(c=a.K)&&c.log(ne,"Problem encountered resetting onreadystatechange: "+e.message,void 0)}}},De=function(a){a.a&&a.$b&&(a.a.ontimeout=null);ga(a.Yb)&&(l.clearTimeout(a.Yb),a.Yb=null)},Ie=function(a){return a.a?a.a.readyState:0},Je=function(a){try{return 2<Ie(a)?
+a.a.status:-1}catch(b){return-1}},Le=function(a){try{return a.a?a.a.responseText:""}catch(b){return K(a.K,"Can not get responseText: "+b.message),""}},Ce=function(a,b){return b+" ["+a.cd+" "+a.Lb+" "+Je(a)+"]"};var Me=function(a,b){this.la=this.Fa=this.qa="";this.Ra=null;this.wa=this.na="";this.H=this.ge=!1;var c;if(a instanceof Me)this.H=void 0!==b?b:a.H,Ne(this,a.qa),c=a.Fa,M(this),this.Fa=c,Oe(this,a.la),Pe(this,a.Ra),Qe(this,a.na),Re(this,a.W.clone()),c=a.wa,M(this),this.wa=c;else if(a&&(c=String(a).match(we))){this.H=!!b;Ne(this,c[1]||"",!0);var d=c[2]||"";M(this);this.Fa=Se(d);Oe(this,c[3]||"",!0);Pe(this,c[4]);Qe(this,c[5]||"",!0);Re(this,c[6]||"",!0);c=c[7]||"";M(this);this.wa=Se(c)}else this.H=
+!!b,this.W=new N(null,0,this.H)};Me.prototype.toString=function(){var a=[],b=this.qa;b&&a.push(Te(b,Ue,!0),":");var c=this.la;if(c||"file"==b)a.push("//"),(b=this.Fa)&&a.push(Te(b,Ue,!0),"@"),a.push(encodeURIComponent(String(c)).replace(/%25([0-9a-fA-F]{2})/g,"%$1")),c=this.Ra,null!=c&&a.push(":",String(c));if(c=this.na)this.la&&"/"!=c.charAt(0)&&a.push("/"),a.push(Te(c,"/"==c.charAt(0)?Ve:We,!0));(c=this.W.toString())&&a.push("?",c);(c=this.wa)&&a.push("#",Te(c,Xe));return a.join("")};
+Me.prototype.resolve=function(a){var b=this.clone(),c=!!a.qa;c?Ne(b,a.qa):c=!!a.Fa;if(c){var d=a.Fa;M(b);b.Fa=d}else c=!!a.la;c?Oe(b,a.la):c=null!=a.Ra;d=a.na;if(c)Pe(b,a.Ra);else if(c=!!a.na){if("/"!=d.charAt(0))if(this.la&&!this.na)d="/"+d;else{var e=b.na.lastIndexOf("/");-1!=e&&(d=b.na.substr(0,e+1)+d)}e=d;if(".."==e||"."==e)d="";else if(u(e,"./")||u(e,"/.")){for(var d=0==e.lastIndexOf("/",0),e=e.split("/"),f=[],g=0;g<e.length;){var k=e[g++];"."==k?d&&g==e.length&&f.push(""):".."==k?((1<f.length||
+1==f.length&&""!=f[0])&&f.pop(),d&&g==e.length&&f.push("")):(f.push(k),d=!0)}d=f.join("/")}else d=e}c?Qe(b,d):c=""!==a.W.toString();c?Re(b,Se(a.W.toString())):c=!!a.wa;c&&(a=a.wa,M(b),b.wa=a);return b};Me.prototype.clone=function(){return new Me(this)};
+var Ne=function(a,b,c){M(a);a.qa=c?Se(b,!0):b;a.qa&&(a.qa=a.qa.replace(/:$/,""))},Oe=function(a,b,c){M(a);a.la=c?Se(b,!0):b},Pe=function(a,b){M(a);if(b){b=Number(b);if(isNaN(b)||0>b)throw Error("Bad port number "+b);a.Ra=b}else a.Ra=null},Qe=function(a,b,c){M(a);a.na=c?Se(b,!0):b},Re=function(a,b,c){M(a);b instanceof N?(a.W=b,a.W.Dc(a.H)):(c||(b=Te(b,Ye)),a.W=new N(b,0,a.H))},O=function(a,b,c){M(a);a.W.set(b,c)},M=function(a){if(a.ge)throw Error("Tried to modify a read-only Uri");};
+Me.prototype.Dc=function(a){this.H=a;this.W&&this.W.Dc(a);return this};
+var Ze=function(a,b){var c=new Me(null,void 0);Ne(c,"https");a&&Oe(c,a);b&&Qe(c,b);return c},Se=function(a,b){return a?b?decodeURI(a.replace(/%25/g,"%2525")):decodeURIComponent(a):""},Te=function(a,b,c){return m(a)?(a=encodeURI(a).replace(b,$e),c&&(a=a.replace(/%25([0-9a-fA-F]{2})/g,"%$1")),a):null},$e=function(a){a=a.charCodeAt(0);return"%"+(a>>4&15).toString(16)+(a&15).toString(16)},Ue=/[#\/\?@]/g,We=/[\#\?:]/g,Ve=/[\#\?]/g,Ye=/[\#\?@]/g,Xe=/#/g,N=function(a,b,c){this.j=this.l=null;this.D=a||null;
+this.H=!!c},af=function(a){a.l||(a.l=new ce,a.j=0,a.D&&xe(a.D,function(b,c){a.add(decodeURIComponent(b.replace(/\+/g," ")),c)}))},cf=function(a){var b=he(a);if("undefined"==typeof b)throw Error("Keys are undefined");var c=new N(null,0,void 0);a=ge(a);for(var d=0;d<b.length;d++){var e=b[d],f=a[d];ea(f)?bf(c,e,f):c.add(e,f)}return c};h=N.prototype;h.Eb=function(){af(this);return this.j};
+h.add=function(a,b){af(this);this.D=null;a=this.G(a);var c=this.l.get(a);c||this.l.set(a,c=[]);c.push(b);this.j=za(this.j)+1;return this};h.remove=function(a){af(this);a=this.G(a);return this.l.eb(a)?(this.D=null,this.j=za(this.j)-this.l.get(a).length,this.l.remove(a)):!1};h.eb=function(a){af(this);a=this.G(a);return this.l.eb(a)};h.ba=function(){af(this);for(var a=this.l.O(),b=this.l.ba(),c=[],d=0;d<b.length;d++)for(var e=a[d],f=0;f<e.length;f++)c.push(b[d]);return c};
+h.O=function(a){af(this);var b=[];if(m(a))this.eb(a)&&(b=Ma(b,this.l.get(this.G(a))));else{a=this.l.O();for(var c=0;c<a.length;c++)b=Ma(b,a[c])}return b};h.set=function(a,b){af(this);this.D=null;a=this.G(a);this.eb(a)&&(this.j=za(this.j)-this.l.get(a).length);this.l.set(a,[b]);this.j=za(this.j)+1;return this};h.get=function(a,b){var c=a?this.O(a):[];return 0<c.length?String(c[0]):b};var bf=function(a,b,c){a.remove(b);0<c.length&&(a.D=null,a.l.set(a.G(b),Oa(c)),a.j=za(a.j)+c.length)};
+N.prototype.toString=function(){if(this.D)return this.D;if(!this.l)return"";for(var a=[],b=this.l.ba(),c=0;c<b.length;c++)for(var d=b[c],e=encodeURIComponent(String(d)),d=this.O(d),f=0;f<d.length;f++){var g=e;""!==d[f]&&(g+="="+encodeURIComponent(String(d[f])));a.push(g)}return this.D=a.join("&")};N.prototype.clone=function(){var a=new N;a.D=this.D;this.l&&(a.l=this.l.clone(),a.j=this.j);return a};N.prototype.G=function(a){a=String(a);this.H&&(a=a.toLowerCase());return a};
+N.prototype.Dc=function(a){a&&!this.H&&(af(this),this.D=null,this.l.forEach(function(a,c){var d=c.toLowerCase();c!=d&&(this.remove(c),bf(this,d,a))},this));this.H=a};var df=function(a,b){var c=[],d;for(d in a)d in b?typeof a[d]!=typeof b[d]?c.push(d):ea(a[d])?Ua(a[d],b[d])||c.push(d):"object"==typeof a[d]&&null!=a[d]&&null!=b[d]?0<df(a[d],b[d]).length&&c.push(d):a[d]!==b[d]&&c.push(d):c.push(d);for(d in b)d in a||c.push(d);return c},ff=function(){var a;a=navigator.userAgent||"";a="Chrome"!=ef(a)?null:(a=a.match(/\sChrome\/(\d+)/i))&&2==a.length?parseInt(a[1],10):null;return a&&30>a?!1:!y||!pb||9<pb},gf=function(a,b,c){var d=Math.floor(1E9*Math.random()).toString();
+b=b||500;c=c||600;var e=(window.screen.availHeight-c)/2,f=(window.screen.availWidth-b)/2;b={width:b,height:c,top:0<e?e:0,left:0<f?f:0,location:!0,resizable:!0,statusbar:!0,toolbar:!1};d&&(b.target=d);-1!=(navigator.userAgent||"").indexOf("Firefox/")&&(a=a||"http://localhost");var g;c=a||"about:blank";(d=b)||(d={});a=window;b=c instanceof A?c:Cb("undefined"!=typeof c.href?c.href:String(c));c=d.target||c.target;e=[];for(g in d)switch(g){case "width":case "height":case "top":case "left":e.push(g+"="+
+d[g]);break;case "target":case "noreferrer":break;default:e.push(g+"="+(d[g]?1:0))}g=e.join(",");(x("iPhone")&&!x("iPod")&&!x("iPad")||x("iPad")||x("iPod"))&&a.navigator&&a.navigator.standalone&&c&&"_self"!=c?(g=a.document.createElement("A"),b=b instanceof A?b:Cb(b),g.href=zb(b),g.setAttribute("target",c),d.noreferrer&&g.setAttribute("rel","noreferrer"),d=document.createEvent("MouseEvent"),d.initMouseEvent("click",!0,!0,a,1),g.dispatchEvent(d),g={}):d.noreferrer?(g=a.open("",c,g),d=zb(b),g&&(eb&&
+u(d,";")&&(d="'"+d.replace(/'/g,"%27")+"'"),g.opener=null,a=new wb,a.Xb="b/12014412, meta tag with sanitized URL",ua.test(d)&&(-1!=d.indexOf("&")&&(d=d.replace(oa,"&amp;")),-1!=d.indexOf("<")&&(d=d.replace(pa,"&lt;")),-1!=d.indexOf(">")&&(d=d.replace(qa,"&gt;")),-1!=d.indexOf('"')&&(d=d.replace(ra,"&quot;")),-1!=d.indexOf("'")&&(d=d.replace(sa,"&#39;")),-1!=d.indexOf("\x00")&&(d=d.replace(ta,"&#0;"))),d='<META HTTP-EQUIV="refresh" content="0; url='+d+'">',Aa(xb(a),"must provide justification"),v(!/^[\s\xa0]*$/.test(xb(a)),
+"must provide non-empty justification"),g.document.write(Fb((new Eb).fe(d))),g.document.close())):g=a.open(zb(b),c,g);if(g)try{g.focus()}catch(k){}return g},hf=function(a){return new H(function(b){var c=function(){ve(2E3).then(function(){if(!a||a.closed)b();else return c()})};return c()})},jf=function(){var a=null;return(new H(function(b){"complete"==l.document.readyState?b():(a=function(){b()},dc(window,"load",a))})).N(function(b){fc(window,"load",a);throw b;})},kf=function(a){switch(a||navigator.product||
+""){case "ReactNative":return"ReactNative";default:return"Browser"}},ef=function(a){var b=a.toLowerCase();if(u(b,"opera/")||u(b,"opr/")||u(b,"opios/"))return"Opera";if(u(b,"msie")||u(b,"trident/"))return"IE";if(u(b,"edge/"))return"Edge";if(u(b,"firefox/"))return"Firefox";if(u(b,"silk/"))return"Silk";if(u(b,"safari/")&&!u(b,"chrome/"))return"Safari";if(!u(b,"chrome/")&&!u(b,"crios/")||u(b,"edge/")){if((a=a.match(/([a-zA-Z\d\.]+)\/[a-zA-Z\d\.]*$/))&&2==a.length)return a[1]}else return"Chrome";return"Other"},
+lf=function(a){var b=kf(void 0);return("Browser"===b?ef(navigator.userAgent||""):b)+"/JsCore/"+a},mf=function(a){a=a.split(".");for(var b=l,c=0;c<a.length&&"object"==typeof b&&null!=b;c++)b=b[a[c]];c!=a.length&&(b=void 0);return b},nf=function(){return!(!l.location||!l.location.protocol||"http:"!=l.location.protocol&&"https:"!=l.location.protocol||"ReactNative"===kf())},of=function(){var a=navigator.userAgent||"",b=a.match(/(ipad)|(iphone)|(ipod)/i),c=a.match(/\sOS\s(\d+)_/i);if(b&&b.length&&c&&2==
+c.length){if(8>parseInt(c[1],10))return!1}else if("Firefox"==ef(a))return!1;return!0},pf=function(a){return"undefined"===typeof a?null:oc(a)},qf=function(a){if(null!==a){var b;try{b=lc(a)}catch(c){try{b=JSON.parse(a)}catch(d){throw c;}}return b}};var rf;try{var sf={};Object.defineProperty(sf,"abcd",{configurable:!0,enumerable:!0,value:1});Object.defineProperty(sf,"abcd",{configurable:!0,enumerable:!0,value:2});rf=2==sf.abcd}catch(a){rf=!1}
+var P=function(a,b,c){rf?Object.defineProperty(a,b,{configurable:!0,enumerable:!0,value:c}):a[b]=c},tf=function(a,b){if(b)for(var c in b)b.hasOwnProperty(c)&&P(a,c,b[c])},uf=function(a){var b={},c;for(c in a)a.hasOwnProperty(c)&&(b[c]=a[c]);return b},vf=function(a,b){if(!b||!b.length)return!0;if(!a)return!1;for(var c=0;c<b.length;c++){var d=a[b[c]];if(void 0===d||null===d||""===d)return!1}return!0};var wf={yd:{rb:985,qb:735,providerId:"facebook.com"},zd:{rb:1040,qb:620,providerId:"github.com"},Ad:{rb:485,qb:640,providerId:"google.com"},Ed:{rb:485,qb:705,providerId:"twitter.com"}},xf=function(a){for(var b in wf)if(wf[b].providerId==a)return wf[b];return null};var Q=function(a,b){this.code="auth/"+a;this.message=b||yf[a]||""};q(Q,Error);Q.prototype.B=function(){return{name:this.code,code:this.code,message:this.message}};
+var yf={"argument-error":"","app-not-authorized":"This app, identified by the domain where it's hosted, is not authorized to use Firebase Authentication with the provided API key. Review your key configuration in the Google API console.","cors-unsupported":"This browser is not supported.","credential-already-in-use":"This credential is already associated with a different user account.","custom-token-mismatch":"The custom token corresponds to a different audience.","requires-recent-login":"This operation is sensitive and requires recent authentication. Log in again before retrying this request.",
+"email-already-in-use":"The email address is already in use by another account.","expired-action-code":"The action code has expired. ","cancelled-popup-request":"This operation has been cancelled due to another conflicting popup being opened.","internal-error":"An internal error has occurred.","invalid-user-token":"The user's credential is no longer valid. The user must sign in again.","invalid-auth-event":"An internal error has occurred.","invalid-custom-token":"The custom token format is incorrect. Please check the documentation.",
+"invalid-email":"The email address is badly formatted.","invalid-api-key":"Your API key is invalid, please check you have copied it correctly.","invalid-credential":"The supplied auth credential is malformed or has expired.","invalid-oauth-provider":"EmailAuthProvider is not supported for this operation. This operation only supports OAuth providers.","unauthorized-domain":"This domain is not authorized for OAuth operations for your Firebase project. Edit the list of authorized domains from the Firebase console.",
+"invalid-action-code":"The action code is invalid. This can happen if the code is malformed, expired, or has already been used.","wrong-password":"The password is invalid or the user does not have a password.","missing-iframe-start":"An internal error has occurred.","auth-domain-config-required":"Be sure to include authDomain when calling firebase.initializeApp(), by following the instructions in the Firebase console.","app-deleted":"This instance of FirebaseApp has been deleted.","account-exists-with-different-credential":"An account already exists with the same email address but different sign-in credentials. Sign in using a provider associated with this email address.",
+"network-request-failed":"A network error (such as timeout, interrupted connection or unreachable host) has occurred.","no-auth-event":"An internal error has occurred.","no-such-provider":"User was not linked to an account with the given provider.","operation-not-allowed":"The given sign-in provider is disabled for this Firebase project. Enable it in the Firebase console, under the sign-in method tab of the Auth section.","operation-not-supported-in-this-environment":'This operation is not supported in the environment this application is running on. "location.protocol" must be http or https.',
+"popup-blocked":"Unable to establish a connection with the popup. It may have been blocked by the browser.","popup-closed-by-user":"The popup has been closed by the user before finalizing the operation.","provider-already-linked":"User can only be linked to one identity for the given provider.",timeout:"The operation has timed out.","user-token-expired":"The user's credential is no longer valid. The user must sign in again.","too-many-requests":"We have blocked all requests from this device due to unusual activity. Try again later.",
+"user-not-found":"There is no user record corresponding to this identifier. The user may have been deleted.","user-disabled":"The user account has been disabled by an administrator.","user-mismatch":"The supplied credentials do not correspond to the previously signed in user.","user-signed-out":"","weak-password":"The password must be 6 characters long or more.","web-storage-unsupported":"This browser is not supported."};var zf=function(a,b,c,d,e){this.sa=a;this.va=b||null;this.$a=c||null;this.Ub=d||null;this.F=e||null;if(this.$a||this.F){if(this.$a&&this.F)throw new Q("invalid-auth-event");if(this.$a&&!this.Ub)throw new Q("invalid-auth-event");}else throw new Q("invalid-auth-event");};zf.prototype.getError=function(){return this.F};zf.prototype.B=function(){return{type:this.sa,eventId:this.va,urlResponse:this.$a,sessionId:this.Ub,error:this.F&&this.F.B()}};var Af=function(a){this.ie=a.sub;la();this.Ab=a.email||null};var Bf=function(a,b,c,d){var e={};ha(c)?e=c:b&&m(c)&&m(d)?e={oauthToken:c,oauthTokenSecret:d}:!b&&m(c)&&(e={accessToken:c});if(b||!e.idToken&&!e.accessToken)if(b&&e.oauthToken&&e.oauthTokenSecret)P(this,"accessToken",e.oauthToken),P(this,"secret",e.oauthTokenSecret);else{if(b)throw new Q("argument-error","credential failed: expected 2 arguments (the OAuth access token and secret).");throw new Q("argument-error","credential failed: expected 1 argument (the OAuth access token).");}else e.idToken&&P(this,
+"idToken",e.idToken),e.accessToken&&P(this,"accessToken",e.accessToken);P(this,"provider",a)};Bf.prototype.Fb=function(a){return Cf(a,Df(this))};Bf.prototype.dd=function(a,b){var c=Df(this);c.idToken=b;return R(a,Ef,c)};var Df=function(a){var b={};a.idToken&&(b.id_token=a.idToken);a.accessToken&&(b.access_token=a.accessToken);a.secret&&(b.oauth_token_secret=a.secret);b.providerId=a.provider;return{postBody:cf(b).toString(),requestUri:nf()?window.location.href:"http://localhost"}};
+Bf.prototype.B=function(){var a={provider:this.provider};this.idToken&&(a.oauthIdToken=this.idToken);this.accessToken&&(a.oauthAccessToken=this.accessToken);this.secret&&(a.oauthTokenSecret=this.secret);return a};
+var Ff=function(a,b){var c=!!b,d=function(){tf(this,{providerId:a,isOAuthProvider:!0});this.Cc=[]};c||(d.prototype.addScope=function(a){Ia(this.Cc,a)||this.Cc.push(a)});d.prototype.Gb=function(){return Oa(this.Cc)};d.credential=function(b,d){return new Bf(a,c,b,d)};tf(d,{PROVIDER_ID:a});return d},Gf=Ff("facebook.com");Gf.prototype.addScope=Gf.prototype.addScope||void 0;var Hf=Ff("github.com");Hf.prototype.addScope=Hf.prototype.addScope||void 0;var If=Ff("google.com");
+If.prototype.addScope=If.prototype.addScope||void 0;If.credential=function(a,b){if(!a&&!b)throw new Q("argument-error","credential failed: must provide the ID token and/or the access token.");return new Bf("google.com",!1,ha(a)?a:{idToken:a||null,accessToken:b||null})};var Jf=Ff("twitter.com",!0),Kf=function(a,b){this.Ab=a;this.vc=b;P(this,"provider","password")};Kf.prototype.Fb=function(a){return R(a,Lf,{email:this.Ab,password:this.vc})};
+Kf.prototype.dd=function(a,b){return R(a,Mf,{idToken:b,email:this.Ab,password:this.vc})};Kf.prototype.B=function(){return{email:this.Ab,password:this.vc}};var Nf=function(){tf(this,{providerId:"password",isOAuthProvider:!1})};tf(Nf,{PROVIDER_ID:"password"});
+var Of={Ee:Nf,yd:Gf,Ad:If,zd:Hf,Ed:Jf},Pf=function(a){var b=a&&a.providerId;if(!b)return null;var c=a&&a.oauthAccessToken,d=a&&a.oauthTokenSecret;a=a&&a.oauthIdToken;for(var e in Of)if(Of[e].PROVIDER_ID==b)try{return Of[e].credential({accessToken:c,idToken:a,oauthToken:c,oauthTokenSecret:d})}catch(f){break}return null};var Qf=function(a,b,c){Q.call(this,"account-exists-with-different-credential",c);P(this,"email",a);P(this,"credential",b)};q(Qf,Q);Qf.prototype.B=function(){var a={code:this.code,message:this.message,email:this.email},b=this.credential&&this.credential.B();b&&(Za(a,b),a.providerId=b.provider,delete a.provider);return a};var S=function(a,b,c){this.v=a;a=b||{};this.te=a.secureTokenEndpoint||"https://securetoken.googleapis.com/v1/token";this.ve=a.secureTokenTimeout||1E4;this.ue=Xa(a.secureTokenHeaders||Rf);this.Qd=a.firebaseEndpoint||"https://www.googleapis.com/identitytoolkit/v3/relyingparty/";this.Rd=a.firebaseTimeout||1E4;this.Tc=Xa(a.firebaseHeaders||Sf);c&&(this.Tc["X-Client-Version"]=c);this.Id=new xc},Tf,Rf={"Content-Type":"application/x-www-form-urlencoded"},Sf={"Content-Type":"application/json"},Vf=function(a,
+b,c,d,e,f,g){ff()?a=p(a.xe,a):(Tf||(Tf=new H(function(a,b){Uf(a,b)})),a=p(a.we,a));a(b,c,d,e,f,g)};
+S.prototype.xe=function(a,b,c,d,e,f){var g="ReactNative"===kf()?new L:new L(this.Id),k;f&&(g.Ya=Math.max(0,f),k=setTimeout(function(){g.dispatchEvent("timeout")},f));g.listen("complete",function(){k&&clearTimeout(k);var a=null;try{var c;c=this.a?lc(this.a.responseText):void 0;a=c||null}catch(d){try{a=JSON.parse(Le(this))||null}catch(e){a=null}}b&&b(a)});ec(g,"ready",function(){k&&clearTimeout(k);this.ua||(this.ua=!0,this.Ka())});ec(g,"timeout",function(){k&&clearTimeout(k);this.ua||(this.ua=!0,this.Ka());
+b&&b(null)});g.send(a,c,d,e)};var Wf="__fcb"+Math.floor(1E6*Math.random()).toString(),Uf=function(a,b){((window.gapi||{}).client||{}).request?a():(l[Wf]=function(){((window.gapi||{}).client||{}).request?a():b(Error("CORS_UNSUPPORTED"))},Nd(Vd("https://apis.google.com/js/client.js?onload="+Wf),function(){b(Error("CORS_UNSUPPORTED"))}))};
+S.prototype.we=function(a,b,c,d,e){var f=this;Tf.then(function(){window.gapi.client.setApiKey(f.v);var g=window.gapi.auth.getToken();window.gapi.auth.setToken(null);window.gapi.client.request({path:a,method:c,body:d,headers:e,authType:"none",callback:function(a){window.gapi.auth.setToken(g);b&&b(a)}})}).N(function(a){b&&b({error:{message:a&&a.message||"CORS_UNSUPPORTED"}})})};
+var Yf=function(a,b){return new H(function(c,d){"refresh_token"==b.grant_type&&b.refresh_token||"authorization_code"==b.grant_type&&b.code?Vf(a,a.te+"?key="+encodeURIComponent(a.v),function(a){a?a.error?d(Xf(a)):a.access_token&&a.refresh_token?c(a):d(new Q("internal-error")):d(new Q("network-request-failed"))},"POST",cf(b).toString(),a.ue,a.ve):d(new Q("internal-error"))})},Zf=function(a){var b={},c;for(c in a)null!==a[c]&&void 0!==a[c]&&(b[c]=a[c]);return oc(b)},$f=function(a,b,c,d,e){var f=a.Qd+
+b+"?key="+encodeURIComponent(a.v);e&&(f+="&cb="+la().toString());return new H(function(b,e){Vf(a,f,function(a){a?a.error?e(Xf(a)):b(a):e(new Q("network-request-failed"))},c,Zf(d),a.Tc,a.Rd)})},ag=function(a){if(!kc.test(a.email))throw new Q("invalid-email");},bg=function(a){"email"in a&&ag(a)},dg=function(a,b){return R(a,cg,{identifier:b,continueUri:nf()?window.location.href:"http://localhost"}).then(function(a){return a.allProviders||[]})},fg=function(a){return R(a,eg,{}).then(function(a){return a.authorizedDomains||
+[]})},gg=function(a){if(!a.idToken)throw new Q("internal-error");};S.prototype.signInAnonymously=function(){return R(this,hg,{})};S.prototype.updateEmail=function(a,b){return R(this,ig,{idToken:a,email:b})};S.prototype.updatePassword=function(a,b){return R(this,Mf,{idToken:a,password:b})};var jg={displayName:"DISPLAY_NAME",photoUrl:"PHOTO_URL"};
+S.prototype.updateProfile=function(a,b){var c={idToken:a},d=[];Qa(jg,function(a,f){var g=b[f];null===g?d.push(a):f in b&&(c[f]=g)});d.length&&(c.deleteAttribute=d);return R(this,ig,c)};S.prototype.sendPasswordResetEmail=function(a){return R(this,kg,{requestType:"PASSWORD_RESET",email:a})};S.prototype.sendEmailVerification=function(a){return R(this,lg,{requestType:"VERIFY_EMAIL",idToken:a})};
+var ng=function(a,b,c){return R(a,mg,{idToken:b,deleteProvider:c})},og=function(a){if(!a.requestUri||!a.sessionId&&!a.postBody)throw new Q("internal-error");},pg=function(a){if(a.needConfirmation)throw(a&&a.email?new Qf(a.email,Pf(a),a.message):null)||new Q("account-exists-with-different-credential");if(!a.idToken)throw new Q("internal-error");},Cf=function(a,b){return R(a,qg,b)},rg=function(a){if(!a.oobCode)throw new Q("invalid-action-code");};
+S.prototype.confirmPasswordReset=function(a,b){return R(this,sg,{oobCode:a,newPassword:b})};S.prototype.checkActionCode=function(a){return R(this,tg,{oobCode:a})};S.prototype.applyActionCode=function(a){return R(this,ug,{oobCode:a})};
+var ug={endpoint:"setAccountInfo",w:rg,Xa:"email"},tg={endpoint:"resetPassword",w:rg,oa:function(a){if(!kc.test(a.email))throw new Q("internal-error");}},vg={endpoint:"signupNewUser",w:function(a){ag(a);if(!a.password)throw new Q("weak-password");},oa:gg,pa:!0},cg={endpoint:"createAuthUri"},wg={endpoint:"deleteAccount",Wa:["idToken"]},mg={endpoint:"setAccountInfo",Wa:["idToken","deleteProvider"],w:function(a){if(!ea(a.deleteProvider))throw new Q("internal-error");}},xg={endpoint:"getAccountInfo"},
+lg={endpoint:"getOobConfirmationCode",Wa:["idToken","requestType"],w:function(a){if("VERIFY_EMAIL"!=a.requestType)throw new Q("internal-error");},Xa:"email"},kg={endpoint:"getOobConfirmationCode",Wa:["requestType"],w:function(a){if("PASSWORD_RESET"!=a.requestType)throw new Q("internal-error");ag(a)},Xa:"email"},eg={Hd:!0,endpoint:"getProjectConfig",Zd:"GET"},sg={endpoint:"resetPassword",w:rg,Xa:"email"},ig={endpoint:"setAccountInfo",Wa:["idToken"],w:bg,pa:!0},Mf={endpoint:"setAccountInfo",Wa:["idToken"],
+w:function(a){bg(a);if(!a.password)throw new Q("weak-password");},oa:gg,pa:!0},hg={endpoint:"signupNewUser",oa:gg,pa:!0},qg={endpoint:"verifyAssertion",w:og,oa:pg,pa:!0},Ef={endpoint:"verifyAssertion",w:function(a){og(a);if(!a.idToken)throw new Q("internal-error");},oa:pg,pa:!0},yg={endpoint:"verifyCustomToken",w:function(a){if(!a.token)throw new Q("invalid-custom-token");},oa:gg,pa:!0},Lf={endpoint:"verifyPassword",w:function(a){ag(a);if(!a.password)throw new Q("wrong-password");},oa:gg,pa:!0},R=
+function(a,b,c){if(!vf(c,b.Wa))return J(new Q("internal-error"));var d=b.Zd||"POST",e;return I(c).then(b.w).then(function(){b.pa&&(c.returnSecureToken=!0);return $f(a,b.endpoint,d,c,b.Hd||!1)}).then(function(a){return e=a}).then(b.oa).then(function(){if(!b.Xa)return e;if(!(b.Xa in e))throw new Q("internal-error");return e[b.Xa]})},Xf=function(a){var b;b=(a.error&&a.error.errors&&a.error.errors[0]||{}).reason||"";var c={keyInvalid:"invalid-api-key",ipRefererBlocked:"app-not-authorized"};if(b=c[b]?
+new Q(c[b]):null)return b;a=a.error&&a.error.message||"";b={INVALID_CUSTOM_TOKEN:"invalid-custom-token",CREDENTIAL_MISMATCH:"custom-token-mismatch",MISSING_CUSTOM_TOKEN:"internal-error",INVALID_IDENTIFIER:"invalid-email",MISSING_CONTINUE_URI:"internal-error",INVALID_EMAIL:"invalid-email",INVALID_PASSWORD:"wrong-password",USER_DISABLED:"user-disabled",MISSING_PASSWORD:"internal-error",EMAIL_EXISTS:"email-already-in-use",PASSWORD_LOGIN_DISABLED:"operation-not-allowed",INVALID_IDP_RESPONSE:"invalid-credential",
+FEDERATED_USER_ID_ALREADY_LINKED:"credential-already-in-use",EMAIL_NOT_FOUND:"user-not-found",EXPIRED_OOB_CODE:"expired-action-code",INVALID_OOB_CODE:"invalid-action-code",MISSING_OOB_CODE:"internal-error",CREDENTIAL_TOO_OLD_LOGIN_AGAIN:"requires-recent-login",INVALID_ID_TOKEN:"invalid-user-token",TOKEN_EXPIRED:"user-token-expired",USER_NOT_FOUND:"user-token-expired",CORS_UNSUPPORTED:"cors-unsupported"};if(b[a])return new Q(b[a]);b={TOO_MANY_ATTEMPTS_TRY_LATER:"too-many-requests",WEAK_PASSWORD:"weak-password",
+OPERATION_NOT_ALLOWED:"operation-not-allowed"};for(var d in b)if(0===a.indexOf(d))return new Q(b[d]);return new Q("internal-error")};var zg=function(a){this.L=a};zg.prototype.value=function(){return this.L};zg.prototype.rd=function(a){this.L.style=a;return this};var Ag=function(a){this.L=a||{}};Ag.prototype.value=function(){return this.L};Ag.prototype.rd=function(a){this.L.style=a;return this};var Cg=function(a){this.De=a;this.pc=null;this.ne=Bg(this)},Dg,Eg=function(a){var b=new Ag;b.L.where=document.body;b.L.url=a.De;b.L.messageHandlersFilter=mf("gapi.iframes.CROSS_ORIGIN_IFRAMES_FILTER");b.L.attributes=b.L.attributes||{};(new zg(b.L.attributes)).rd({position:"absolute",top:"-100px",width:"1px",height:"1px"});b.L.dontclear=!0;return b},Bg=function(a){return Fg().then(function(){return new H(function(b){mf("gapi.iframes.getContext")().open(Eg(a).value(),function(c){a.pc=c;a.pc.restyle({setHideOnLeave:!1});
+b()})})})},Gg=function(a,b){a.ne.then(function(){a.pc.register("authEvent",b,mf("gapi.iframes.CROSS_ORIGIN_IFRAMES_FILTER"))})},Hg="__iframefcb"+Math.floor(1E6*Math.random()).toString(),Fg=function(){return Dg?Dg:Dg=new H(function(a,b){var c=function(){mf("gapi.load")("gapi.iframes",function(){a()})};mf("gapi.iframes.Iframe")?a():mf("gapi.load")?c():(l[Hg]=function(){mf("gapi.load")?c():b()},Nd(Vd("https://apis.google.com/js/api.js?onload="+Hg),function(){b()}))})};var Jg=function(a,b,c,d){this.S=a;this.v=b;this.ka=c;d=this.ta=d||null;a=Ze(a,"/__/auth/iframe");O(a,"apiKey",b);O(a,"appName",c);d&&O(a,"v",d);this.ae=a.toString();this.be=new Cg(this.ae);this.dc=[];Ig(this)},Kg=function(a,b,c,d,e,f,g,k,t){a=Ze(a,"/__/auth/handler");O(a,"apiKey",b);O(a,"appName",c);O(a,"authType",d);O(a,"providerId",e);f&&f.length&&O(a,"scopes",f.join(","));g&&O(a,"redirectUrl",g);k&&O(a,"eventId",k);t&&O(a,"v",t);return a.toString()},Ig=function(a){Gg(a.be,function(b){var c={};
+if(b&&b.authEvent){var d=!1;b=b.authEvent||{};if(b.type){if(c=b.error)var e=(c=b.error)&&(c.name||c.code),c=e?new Q(e.substring(5),c.message):null;b=new zf(b.type,b.eventId,b.urlResponse,b.sessionId,c)}else b=null;for(c=0;c<a.dc.length;c++)d=a.dc[c](b)||d;c={};c.status=d?"ACK":"ERROR";return I(c)}c.status="ERROR";return I(c)})};var Lg=function(){};var Mg=function(){};q(Mg,Lg);Mg.prototype.Eb=function(){var a=0;be(this.ab(!0),function(b){Aa(b);a++});return a};var Ng=function(a){this.g=a};q(Ng,Mg);var Og=function(a){if(!a.g)return!1;try{return a.g.setItem("__sak","1"),a.g.removeItem("__sak"),!0}catch(b){return!1}};h=Ng.prototype;h.set=function(a,b){try{this.g.setItem(a,b)}catch(c){if(0==this.g.length)throw"Storage mechanism: Storage disabled";throw"Storage mechanism: Quota exceeded";}};h.get=function(a){a=this.g.getItem(a);if(!m(a)&&null!==a)throw"Storage mechanism: Invalid value was encountered";return a};h.remove=function(a){this.g.removeItem(a)};
+h.Eb=function(){return this.g.length};h.ab=function(a){var b=0,c=this.g,d=new $d;d.next=function(){if(b>=c.length)throw Zd;var d=Aa(c.key(b++));if(a)return d;d=c.getItem(d);if(!m(d))throw"Storage mechanism: Invalid value was encountered";return d};return d};h.key=function(a){return this.g.key(a)};var Pg=function(){var a=null;try{a=window.localStorage||null}catch(b){}this.g=a};q(Pg,Ng);var Qg=function(){var a=null;try{a=window.sessionStorage||null}catch(b){}this.g=a};q(Qg,Ng);var Rg=function(a){this.g=a||firebase.INTERNAL.reactNative&&firebase.INTERNAL.reactNative.AsyncStorage;if(!this.g)throw new Q("internal-error","The React Native compatibility library was not found.");};h=Rg.prototype;h.get=function(a){return I(this.g.getItem(a)).then(function(a){return a&&qf(a)})};h.set=function(a,b){return I(this.g.setItem(a,pf(b)))};h.remove=function(a){return I(this.g.removeItem(a))};h.Ia=function(){};h.Ua=function(){};var Sg=function(){if(!Og(new Pg))throw new Q("web-storage-unsupported");this.g=window.localStorage};h=Sg.prototype;h.get=function(a){var b=this;return I().then(function(){var c=b.g.getItem(a);return qf(c)})};h.set=function(a,b){var c=this;return I().then(function(){var d=pf(b);null===d?c.remove(a):c.g.setItem(a,d)})};h.remove=function(a){var b=this;return I().then(function(){b.g.removeItem(a)})};h.Ia=function(a){Xb(window,"storage",a)};h.Ua=function(a){fc(window,"storage",a)};var Tg=function(){this.g={}};h=Tg.prototype;h.get=function(){return I(null)};h.set=function(){return I()};h.remove=function(){return I()};h.Ia=function(){};h.Ua=function(){};var Ug=function(){if(!Og(new Qg))throw new Q("web-storage-unsupported");this.g=window.sessionStorage};h=Ug.prototype;h.get=function(a){var b=this;return I().then(function(){var c=b.g.getItem(a);return qf(c)})};h.set=function(a,b){var c=this;return I().then(function(){var d=pf(b);null===d?c.remove(a):c.g.setItem(a,d)})};h.remove=function(a){var b=this;return I().then(function(){b.g.removeItem(a)})};h.Ia=function(){};h.Ua=function(){};var Xg=function(){this.Qc={Browser:Vg,ReactNative:Wg}[kf()]},Yg,Vg={M:Sg,sd:Ug},Wg={M:Rg,sd:Tg};var Zg="First Second Third Fourth Fifth Sixth Seventh Eighth Ninth".split(" "),T=function(a,b){return{name:a||"",Y:"a valid string",optional:!!b,Z:m}},$g=function(a){return{name:a||"",Y:"a valid object",optional:!1,Z:ha}},ah=function(a,b){return{name:a||"",Y:"a function",optional:!!b,Z:n}},bh=function(){return{name:"",Y:"null",optional:!1,Z:da}},ch=function(){return{name:"credential",Y:"a valid credential",optional:!1,Z:function(a){return!(!a||!a.Fb)}}},dh=function(){return{name:"authProvider",Y:"a valid Auth provider",
+optional:!1,Z:function(a){return!!(a&&a.providerId&&a.hasOwnProperty&&a.hasOwnProperty("isOAuthProvider"))}}},eh=function(a,b,c,d){return{name:c||"",Y:a.Y+" or "+b.Y,optional:!!d,Z:function(c){return a.Z(c)||b.Z(c)}}};var gh=function(a,b){for(var c in b){var d=b[c].name;a[d]=fh(d,a[c],b[c].b)}},U=function(a,b,c,d){a[b]=fh(b,c,d)},fh=function(a,b,c){if(!c)return b;var d=hh(a);a=function(){var a=Array.prototype.slice.call(arguments),e;a:{e=Array.prototype.slice.call(a);var k;k=0;for(var t=!1,Y=0;Y<c.length;Y++)if(c[Y].optional)t=!0;else{if(t)throw new Q("internal-error","Argument validator encountered a required argument after an optional argument.");k++}t=c.length;if(e.length<k||t<e.length)e="Expected "+(k==t?1==
+k?"1 argument":k+" arguments":k+"-"+t+" arguments")+" but got "+e.length+".";else{for(k=0;k<e.length;k++)if(t=c[k].optional&&void 0===e[k],!c[k].Z(e[k])&&!t){e=c[k];if(0>k||k>=Zg.length)throw new Q("internal-error","Argument validator received an unsupported number of arguments.");e=Zg[k]+" argument "+(e.name?'"'+e.name+'" ':"")+"must be "+e.Y+".";break a}e=null}}if(e)throw new Q("argument-error",d+" failed: "+e);return b.apply(this,a)};for(var e in b)a[e]=b[e];for(e in b.prototype)a.prototype[e]=
+b.prototype[e];return a},hh=function(a){a=a.split(".");return a[a.length-1]};var kh=function(a,b,c){var d=(this.ta=firebase.SDK_VERSION||null)?lf(this.ta):null;this.c=new S(b,null,d);this.Qa=null;this.S=a;this.v=b;this.ka=c;this.vb=[];this.$c=!1;this.Gd=p(this.Td,this);this.sb=new ih(this);this.kd=new jh(this);this.Za={};this.Za.unknown=this.sb;this.Za.signInViaRedirect=this.sb;this.Za.linkViaRedirect=this.sb;this.Za.signInViaPopup=this.kd;this.Za.linkViaPopup=this.kd},lh=function(a){var b=window.location.href;return fg(a).then(function(a){a:{for(var d=(b instanceof Me?b.clone():
+new Me(b,void 0)).la,e=0;e<a.length;e++){var f;var g=a[e];f=d;var k=Pc(g);k?f=(f=Pc(f))?k.Bb(f):!1:(k=g.split(".").join("\\."),f=(new RegExp("^(.+."+k+"|"+k+")$","i")).test(f));if(f){a=!0;break a}}a=!1}if(!a)throw new Q("unauthorized-domain");})},mh=function(a){a.$c=!0;jf().then(function(){a.$d=new Jg(a.S,a.v,a.ka,a.ta);a.$d.dc.push(a.Gd)})};kh.prototype.subscribe=function(a){Ia(this.vb,a)||this.vb.push(a);this.$c||mh(this)};kh.prototype.unsubscribe=function(a){La(this.vb,function(b){return b==a})};
+kh.prototype.Td=function(a){if(!a)throw new Q("invalid-auth-event");for(var b=!1,c=0;c<this.vb.length;c++){var d=this.vb[c];if(d.Mc(a.sa,a.va)){(b=this.Za[a.sa])&&b.ld(a,d);b=!0;break}}a=this.sb;a.zc||(a.zc=!0,nh(a,!1,null,null));return b};kh.prototype.getRedirectResult=function(){return this.sb.getRedirectResult()};
+var ph=function(a,b,c,d,e){if(!b)return J(new Q("popup-blocked"));a.Qa||(a.Qa=lh(a.c));return a.Qa.then(function(){oh(d);var f=Kg(a.S,a.v,a.ka,c,d.providerId,d.Gb(),null,e,a.ta);Gb((b||window).location,f);return b})},qh=function(a,b,c,d){a.Qa||(a.Qa=lh(a.c));return a.Qa.then(function(){oh(c);var e=Kg(a.S,a.v,a.ka,b,c.providerId,c.Gb(),window.location.href,d,a.ta);Gb(window.location,e)})},rh=function(a,b,c,d){var e=new Q("popup-closed-by-user");return hf(c).then(function(){return ve(3E4).then(function(){a.Ea(b,
+null,e,d)})})},oh=function(a){if(!a.isOAuthProvider)throw new Q("invalid-oauth-provider");},sh={},th=function(a,b,c){var d=b+":"+c;sh[d]||(sh[d]=new kh(a,b,c));return sh[d]},ih=function(a){this.P=a;this.Ac=this.Rb=this.Ta=this.X=null;this.zc=!1};ih.prototype.ld=function(a,b){if(!a)return J(new Q("invalid-auth-event"));this.zc=!0;var c=a.sa,d=a.va;"unknown"==c?(this.X||nh(this,!1,null,null),c=I()):c=a.F?this.xc(a,b):b.fb(c,d)?this.yc(a,b):J(new Q("invalid-auth-event"));return c};
+ih.prototype.xc=function(a){this.X||nh(this,!0,null,a.getError());return I()};ih.prototype.yc=function(a,b){var c=this,d=a.sa,e=b.fb(d,a.va),f="signInViaRedirect"==d||"linkViaRedirect"==d;return e(a.$a,a.Ub).then(function(a){c.X||nh(c,f,a,null)}).N(function(a){c.X||nh(c,f,null,a)})};var nh=function(a,b,c,d){b?d?(a.X=function(){return J(d)},a.Rb&&a.Rb(d)):(a.X=function(){return I(c)},a.Ta&&a.Ta(c)):(a.X=function(){return I({user:null})},a.Ta&&a.Ta({user:null}));a.Ta=null;a.Rb=null};
+ih.prototype.getRedirectResult=function(){var a=this;this.Kc||(this.Kc=new H(function(b,c){a.X?a.X().then(b,c):(a.Ta=b,a.Rb=c,uh(a))}));return this.Kc};var uh=function(a){var b=new Q("timeout");a.Ac&&a.Ac.cancel();a.Ac=ve(3E4).then(function(){a.X||nh(a,!0,null,b)})},jh=function(a){this.P=a};jh.prototype.ld=function(a,b){if(!a)return J(new Q("invalid-auth-event"));var c=a.sa,d=a.va;return a.F?this.xc(a,b):b.fb(c,d)?this.yc(a,b):J(new Q("invalid-auth-event"))};
+jh.prototype.xc=function(a,b){b.Ea(a.sa,null,a.getError(),a.va);return I()};jh.prototype.yc=function(a,b){var c=a.va,d=a.sa;return b.fb(d,c)(a.$a,a.Ub).then(function(a){b.Ea(d,a,null,c)}).N(function(a){b.Ea(d,null,a,c)})};var vh=function(a){this.c=a;this.Ha=this.ea=null;this.La=0};vh.prototype.B=function(){return{apiKey:this.c.v,refreshToken:this.ea,accessToken:this.Ha,expirationTime:this.La}};var xh=function(a,b){var c=b.idToken,d=b.refreshToken,e=wh(b.expiresIn);a.Ha=c;a.La=e;a.ea=d},wh=function(a){return la()+1E3*parseInt(a,10)},yh=function(a,b){return Yf(a.c,b).then(function(b){a.Ha=b.access_token;a.La=wh(b.expires_in);a.ea=b.refresh_token;return{accessToken:a.Ha,expirationTime:a.La,refreshToken:a.ea}})};
+vh.prototype.getToken=function(a){return a||!this.Ha||la()>this.La-3E4?this.ea?yh(this,{grant_type:"refresh_token",refresh_token:this.ea}):I(null):I({accessToken:this.Ha,expirationTime:this.La,refreshToken:this.ea})};var zh=function(a,b,c,d,e){tf(this,{uid:a,displayName:d||null,photoURL:e||null,email:c||null,providerId:b})},Ah=function(a,b){Lb.call(this,a);for(var c in b)this[c]=b[c]};q(Ah,Lb);
+var V=function(a,b,c){this.R=[];this.v=a.apiKey;this.ka=a.appName;this.S=a.authDomain||null;a=firebase.SDK_VERSION?lf(firebase.SDK_VERSION):null;this.c=new S(this.v,null,a);this.ra=new vh(this.c);Bh(this,b.idToken);xh(this.ra,b);P(this,"refreshToken",this.ra.ea);Ch(this,c||{});Wd.call(this);this.Ob=!1;this.S&&nf()&&(this.s=th(this.S,this.v,this.ka));this.Vb=[]};q(V,Wd);
+var Bh=function(a,b){a.bd=b;P(a,"_lat",b)},Dh=function(a,b){La(a.Vb,function(a){return a==b})},Eh=function(a){for(var b=[],c=0;c<a.Vb.length;c++)b.push(a.Vb[c](a));return sd(b).then(function(){return a})},Fh=function(a){a.s&&!a.Ob&&(a.Ob=!0,a.s.subscribe(a))},Ch=function(a,b){tf(a,{uid:b.uid,displayName:b.displayName||null,photoURL:b.photoURL||null,email:b.email||null,emailVerified:b.emailVerified||!1,isAnonymous:b.isAnonymous||!1,providerData:[]})};P(V.prototype,"providerId","firebase");
+var Gh=function(){},Hh=function(a){return I().then(function(){if(a.Ld)throw new Q("app-deleted");})},Ih=function(a){return Ea(a.providerData,function(a){return a.providerId})},Kh=function(a,b){b&&(Jh(a,b.providerId),a.providerData.push(b))},Jh=function(a,b){La(a.providerData,function(a){return a.providerId==b})},Lh=function(a,b,c){("uid"!=b||c)&&a.hasOwnProperty(b)&&P(a,b,c)};
+V.prototype.copy=function(a){var b=this;b!=a&&(tf(this,{uid:a.uid,displayName:a.displayName,photoURL:a.photoURL,email:a.email,emailVerified:a.emailVerified,isAnonymous:a.isAnonymous,providerData:[]}),w(a.providerData,function(a){Kh(b,a)}),this.ra=a.ra,P(this,"refreshToken",this.ra.ea))};V.prototype.reload=function(){var a=this;return Hh(this).then(function(){return Mh(a).then(function(){return Eh(a)}).then(Gh)})};
+var Mh=function(a){return a.getToken().then(function(b){var c=a.isAnonymous;return Nh(a,b).then(function(){c||Lh(a,"isAnonymous",!1);return b}).N(function(b){"auth/user-token-expired"==b.code&&(a.dispatchEvent(new Ah("userDeleted")),Oh(a));throw b;})})};V.prototype.getToken=function(a){var b=this;return Hh(this).then(function(){return b.ra.getToken(a)}).then(function(a){if(!a)throw new Q("internal-error");a.accessToken!=b.bd&&(Bh(b,a.accessToken),b.ma());Lh(b,"refreshToken",a.refreshToken);return a.accessToken})};
+var Ph=function(a,b){b.idToken&&a.bd!=b.idToken&&(xh(a.ra,b),a.ma(),Bh(a,b.idToken))};V.prototype.ma=function(){this.dispatchEvent(new Ah("tokenChanged"))};var Nh=function(a,b){return R(a.c,xg,{idToken:b}).then(p(a.pe,a))};
+V.prototype.pe=function(a){a=a.users;if(!a||!a.length)throw new Q("internal-error");a=a[0];Ch(this,{uid:a.localId,displayName:a.displayName,photoURL:a.photoUrl,email:a.email,emailVerified:!!a.emailVerified});for(var b=Qh(a),c=0;c<b.length;c++)Kh(this,b[c]);Lh(this,"isAnonymous",!(this.email&&a.passwordHash)&&!(this.providerData&&this.providerData.length))};
+var Qh=function(a){return(a=a.providerUserInfo)&&a.length?Ea(a,function(a){return new zh(a.rawId,a.providerId,a.email,a.displayName,a.photoUrl)}):[]};V.prototype.reauthenticate=function(a){var b=this;return this.f(a.Fb(this.c).then(function(a){var d;a:{var e=a.idToken.split(".");if(3==e.length){for(var e=e[1],f=(4-e.length%4)%4,g=0;g<f;g++)e+=".";try{var k=lc(tb(e));if(k.sub&&k.iss&&k.aud&&k.exp){d=new Af(k);break a}}catch(t){}}d=null}if(!d||b.uid!=d.ie)throw new Q("user-mismatch");Ph(b,a);return b.reload()}))};
+var Rh=function(a,b){return Mh(a).then(function(){if(Ia(Ih(a),b))return Eh(a).then(function(){throw new Q("provider-already-linked");})})};h=V.prototype;h.link=function(a){var b=this;return this.f(Rh(this,a.provider).then(function(){return b.getToken()}).then(function(c){return a.dd(b.c,c)}).then(p(this.Sc,this)))};h.Sc=function(a){Ph(this,a);var b=this;return this.reload().then(function(){return b})};
+h.updateEmail=function(a){var b=this;return this.f(this.getToken().then(function(c){return b.c.updateEmail(c,a)}).then(function(a){Ph(b,a);return b.reload()}))};h.updatePassword=function(a){var b=this;return this.f(this.getToken().then(function(c){return b.c.updatePassword(c,a)}).then(function(a){Ph(b,a);return b.reload()}))};
+h.updateProfile=function(a){if(void 0===a.displayName&&void 0===a.photoURL)return Hh(this);var b=this;return this.f(this.getToken().then(function(c){return b.c.updateProfile(c,{displayName:a.displayName,photoUrl:a.photoURL})}).then(function(a){Ph(b,a);Lh(b,"displayName",a.displayName||null);Lh(b,"photoURL",a.photoUrl||null);return Eh(b)}).then(Gh))};
+h.unlink=function(a){var b=this;return this.f(Mh(this).then(function(c){return Ia(Ih(b),a)?ng(b.c,c,[a]).then(function(a){var c={};w(a.providerUserInfo||[],function(a){c[a.providerId]=!0});w(Ih(b),function(a){c[a]||Jh(b,a)});return Eh(b)}):Eh(b).then(function(){throw new Q("no-such-provider");})}))};h["delete"]=function(){var a=this;return this.f(this.getToken().then(function(b){return R(a.c,wg,{idToken:b})}).then(function(){a.dispatchEvent(new Ah("userDeleted"))})).then(function(){Oh(a)})};
+h.Mc=function(a,b){return"linkViaPopup"==a&&(this.ca||null)==b&&this.V||"linkViaRedirect"==a&&(this.Qb||null)==b?!0:!1};h.Ea=function(a,b,c,d){"linkViaPopup"==a&&d==(this.ca||null)&&(c&&this.Aa?this.Aa(c):b&&!c&&this.V&&this.V(b),this.Ba&&(this.Ba.cancel(),this.Ba=null),delete this.V,delete this.Aa)};h.fb=function(a,b){return"linkViaPopup"==a&&b==(this.ca||null)||"linkViaRedirect"==a&&(this.Qb||null)==b?p(this.Od,this):null};h.Db=function(){return this.uid+":::"+Math.floor(1E9*Math.random()).toString()};
+h.linkWithPopup=function(a){if(!nf())return J(new Q("operation-not-supported-in-this-environment"));var b=this,c=xf(a.providerId),d=this.Db(),e=null;!of()&&this.S&&a.isOAuthProvider&&(e=Kg(this.S,this.v,this.ka,"linkViaPopup",a.providerId,a.Gb(),null,d,firebase.SDK_VERSION||null));var f=gf(e,c&&c.rb,c&&c.qb),c=Rh(this,a.providerId).then(function(){return Eh(b)}).then(function(){b.Na();return b.getToken()}).then(function(){if(!e)return ph(b.s,f,"linkViaPopup",a,d)}).then(function(){return new H(function(a,
+c){b.Ea("linkViaPopup",null,new Q("cancelled-popup-request"),b.ca||null);b.V=a;b.Aa=c;b.ca=d;b.Ba=rh(b,"linkViaPopup",f,d)})}).then(function(a){f&&(f||window).close();return a}).N(function(a){f&&(f||window).close();throw a;});return this.f(c)};
+h.linkWithRedirect=function(a){if(!nf())return J(new Q("operation-not-supported-in-this-environment"));var b=this,c=null,d=this.Db(),e=Rh(this,a.providerId).then(function(){b.Na();return b.getToken()}).then(function(){b.Qb=d;return Eh(b)}).then(function(a){b.Ca&&(a=b.Ca,a=a.P.set(Sh,b.B(),a.$));return a}).then(function(){return qh(b.s,"linkViaRedirect",a,d)}).N(function(a){c=a;if(b.Ca)return Th(b.Ca);throw c;}).then(function(){if(c)throw c;});return this.f(e)};
+h.Na=function(){if(this.s&&this.Ob)return this.s;if(this.s&&!this.Ob)throw new Q("internal-error");throw new Q("auth-domain-config-required");};h.Od=function(a,b){var c=this,d=null,e=this.getToken().then(function(d){return R(c.c,Ef,{requestUri:a,sessionId:b,idToken:d})}).then(function(a){d=Pf(a);return c.Sc(a)}).then(function(a){return{user:a,credential:d}});return this.f(e)};
+h.sendEmailVerification=function(){var a=this;return this.f(this.getToken().then(function(b){return a.c.sendEmailVerification(b)}).then(function(b){if(a.email!=b)return a.reload()}).then(function(){}))};var Oh=function(a){for(var b=0;b<a.R.length;b++)a.R[b].cancel("app-deleted");a.R=[];a.Ld=!0;P(a,"refreshToken",null);a.s&&a.s.unsubscribe(a)};V.prototype.f=function(a){var b=this;this.R.push(a);vd(a,function(){Ka(b.R,a)});return a};V.prototype.toJSON=function(){return this.B()};
+V.prototype.B=function(){var a={uid:this.uid,displayName:this.displayName,photoURL:this.photoURL,email:this.email,emailVerified:this.emailVerified,isAnonymous:this.isAnonymous,providerData:[],apiKey:this.v,appName:this.ka,authDomain:this.S,stsTokenManager:this.ra.B(),redirectEventId:this.Qb||null};w(this.providerData,function(b){a.providerData.push(uf(b))});return a};
+var Uh=function(a){if(!a.apiKey)return null;var b={apiKey:a.apiKey,authDomain:a.authDomain,appName:a.appName},c={};if(a.stsTokenManager&&a.stsTokenManager.accessToken&&a.stsTokenManager.refreshToken&&a.stsTokenManager.expirationTime)c.idToken=a.stsTokenManager.accessToken,c.refreshToken=a.stsTokenManager.refreshToken,c.expiresIn=(a.stsTokenManager.expirationTime-la())/1E3;else return null;var d=new V(b,c,a);a.providerData&&w(a.providerData,function(a){if(a){var b={};tf(b,a);Kh(d,b)}});a.redirectEventId&&
+(d.Qb=a.redirectEventId);return d},Vh=function(a,b,c){var d=new V(a,b);c&&(d.Ca=c);return d.reload().then(function(){return d})};var Wh,Xh=function(a,b,c,d,e,f){this.Kd=a;this.tc=b;this.ic=c;this.wd=d;this.ha=e;this.J={};this.ub=[];this.ob=0;this.ce=f||l.indexedDB},Yh=function(a){return new H(function(b,c){var d=a.ce.open(a.Kd,a.ha);d.onerror=function(a){c(Error(a.target.errorCode))};d.onupgradeneeded=function(b){b=b.target.result;try{b.createObjectStore(a.tc,{keyPath:a.ic})}catch(d){c(d)}};d.onsuccess=function(a){b(a.target.result)}})},Zh=function(a){a.Zc||(a.Zc=Yh(a));return a.Zc},$h=function(a,b){return b.objectStore(a.tc)},
+ai=function(a,b,c){return b.transaction([a.tc],c?"readwrite":"readonly")},bi=function(a){return new H(function(b,c){a.onsuccess=function(a){a&&a.target?b(a.target.result):b()};a.onerror=function(a){c(Error(a.target.errorCode))}})};h=Xh.prototype;
+h.set=function(a,b){var c=!1,d,e=this;return vd(Zh(this).then(function(b){d=b;b=$h(e,ai(e,d,!0));return bi(b.get(a))}).then(function(f){var g=$h(e,ai(e,d,!0));if(f)return f.value=b,bi(g.put(f));e.ob++;c=!0;f={};f[e.ic]=a;f[e.wd]=b;return bi(g.add(f))}).then(function(){e.J[a]=b}),function(){c&&e.ob--})};h.get=function(a){var b=this;return Zh(this).then(function(c){return bi($h(b,ai(b,c,!1)).get(a))})};
+h.remove=function(a){var b=!1,c=this;return vd(Zh(this).then(function(d){b=!0;c.ob++;return bi($h(c,ai(c,d,!0))["delete"](a))}).then(function(){delete c.J[a]}),function(){b&&c.ob--})};
+h.ze=function(){var a=this;return Zh(this).then(function(b){var c=$h(a,ai(a,b,!1));return c.getAll?bi(c.getAll()):new H(function(a,b){var f=[],g=c.openCursor();g.onsuccess=function(b){(b=b.target.result)?(f.push(b.value),b["continue"]()):a(f)};g.onerror=function(a){b(Error(a.target.errorCode))}})}).then(function(b){var c={},d=[];if(0==a.ob){for(d=0;d<b.length;d++)c[b[d][a.ic]]=b[d][a.wd];d=df(a.J,c);a.J=c}return d})};h.Ia=function(a){0==this.ub.length&&this.Fc();this.ub.push(a)};
+h.Ua=function(a){La(this.ub,function(b){return b==a});0==this.ub.length&&this.Wb()};h.Fc=function(){var a=this;this.Wb();var b=function(){a.wc=ve(1E3).then(p(a.ze,a)).then(function(b){0<b.length&&w(a.ub,function(a){a(b)})}).then(b).N(function(a){"STOP_EVENT"!=a.message&&b()});return a.wc};b()};h.Wb=function(){this.wc&&this.wc.cancel("STOP_EVENT")};var ci=function(a,b,c,d,e,f){this.le=a;this.pd=b;this.nb=d;this.se=e;this.tb=f;this.I={};Yg||(Yg=new Xg);a=Yg;this.pb=new a.Qc.M;this.Hc=new a.Qc.sd;this.ib=c;this.ed=p(this.fd,this);this.Yc=p(this.de,this);this.J={}},di,ei=function(){if(!di){Wh||(Wh=new Xh("firebaseLocalStorageDb","firebaseLocalStorage","fbase_key","value",1));var a=(navigator.userAgent||"").toLowerCase();di=new ci("firebase",":",Wh,y&&!!pb&&11==pb||/Edge\/\d+/.test($a),-1!=a.indexOf("safari")&&-1==a.indexOf("chrome")&&window!=window.top?
+!0:!1,of())}return di};h=ci.prototype;h.G=function(a,b){return this.le+this.pd+a.name+(b?this.pd+b:"")};h.get=function(a,b){var c=this.G(a,b);return this.nb&&a.M?this.ib.get(c).then(function(a){return a&&a.value}):(a.M?this.pb:this.Hc).get(c)};h.remove=function(a,b){var c=this.G(a,b);if(this.nb&&a.M)return this.ib.remove(c);a.M&&!this.tb&&(this.J[c]=null);return(a.M?this.pb:this.Hc).remove(c)};
+h.set=function(a,b,c){var d=this.G(a,c);if(this.nb&&a.M)return this.ib.set(d,b);var e=this,f=a.M?this.pb:this.Hc;return f.set(d,b).then(function(){return f.get(d)}).then(function(b){a.M&&!this.tb&&(e.J[d]=b)})};h.addListener=function(a,b,c){a=this.G(a,b);this.tb||(this.J[a]=window.localStorage.getItem(a));Ta(this.I)&&this.Fc();this.I[a]||(this.I[a]=[]);this.I[a].push(c)};
+h.removeListener=function(a,b,c){a=this.G(a,b);this.I[a]&&(La(this.I[a],function(a){return a==c}),0==this.I[a].length&&delete this.I[a]);Ta(this.I)&&this.Wb()};h.Fc=function(){this.nb?this.ib.Ia(this.Yc):(this.pb.Ia(this.ed),this.tb||fi(this))};
+var fi=function(a){gi(a);a.sc=setInterval(function(){for(var b in a.I){var c=window.localStorage.getItem(b);c!=a.J[b]&&(a.J[b]=c,c=new Mb({type:"storage",key:b,target:window,oldValue:a.J[b],newValue:c}),a.fd(c))}},2E3)},gi=function(a){a.sc&&(clearInterval(a.sc),a.sc=null)};ci.prototype.Wb=function(){this.nb?this.ib.Ua(this.Yc):(this.pb.Ua(this.ed),this.tb||gi(this))};
+ci.prototype.fd=function(a){var b=a.Cb.key;if(this.se){var c=window.localStorage.getItem(b);a=a.Cb.newValue;a!=c&&(a?window.localStorage.setItem(b,a):a||window.localStorage.removeItem(b))}this.J[b]=window.localStorage.getItem(b);this.Lc(b)};ci.prototype.de=function(a){w(a,p(this.Lc,this))};ci.prototype.Lc=function(a){this.I[a]&&w(this.I[a],function(a){a()})};var hi=function(a){this.$=a;this.P=ei()},Sh={name:"redirectUser",M:!1},Th=function(a){return a.P.remove(Sh,a.$)},ii=function(a,b){return a.P.get(Sh,a.$).then(function(a){a&&b&&(a.authDomain=b);return Uh(a||{})})};var ji=function(a){this.$=a;this.P=ei()},ki={name:"authUser",M:!0},li=function(a){return a.P.remove(ki,a.$)},mi=function(a,b){return a.P.get(ki,a.$).then(function(a){a&&b&&(a.authDomain=b);return Uh(a||{})})};var X=function(a){this.jc=!1;P(this,"app",a);if(W(this).options&&W(this).options.apiKey)a=firebase.SDK_VERSION?lf(firebase.SDK_VERSION):null,this.c=new S(W(this).options&&W(this).options.apiKey,null,a);else throw new Q("invalid-api-key");this.R=[];this.cb=[];this.me=firebase.INTERNAL.createSubscribe(p(this.ee,this));ni(this,null);this.Da=this.ga=null;try{this.ga=new ji(W(this).options.apiKey+":"+W(this).name),this.Da=new hi(W(this).options.apiKey+":"+W(this).name),this.C=this.f(oi(this))}catch(b){this.C=
+J(b)}this.kb=!1;this.Uc=p(this.ye,this);this.ud=p(this.Oa,this);this.vd=p(this.Yd,this);this.td=p(this.Xd,this);pi(this);this.INTERNAL={};this.INTERNAL["delete"]=p(this["delete"],this)};X.prototype.toJSON=function(){return{apiKey:W(this).options.apiKey,authDomain:W(this).options.authDomain,appName:W(this).name,currentUser:Z(this)&&Z(this).B()}};X.prototype.Na=function(){return this.Md||J(new Q("auth-domain-config-required"))};
+var pi=function(a){var b=W(a).options.authDomain,c=W(a).options.apiKey;b&&nf()&&(a.Md=a.C.then(function(){a.s=th(b,c,W(a).name);a.s.subscribe(a);Z(a)&&Fh(Z(a));a.Bc&&(Fh(a.Bc),a.Bc=null);return a.s}))};h=X.prototype;h.Mc=function(a,b){switch(a){case "unknown":case "signInViaRedirect":return!0;case "signInViaPopup":return this.ca==b&&!!this.V;default:return!1}};
+h.Ea=function(a,b,c,d){"signInViaPopup"==a&&this.ca==d&&(c&&this.Aa?this.Aa(c):b&&!c&&this.V&&this.V(b),this.Ba&&(this.Ba.cancel(),this.Ba=null),delete this.V,delete this.Aa)};h.fb=function(a,b){return"signInViaRedirect"==a||"signInViaPopup"==a&&this.ca==b&&this.V?p(this.Pd,this):null};
+h.Pd=function(a,b){var c=this,d=null,e=Cf(c.c,{requestUri:a,sessionId:b}).then(function(a){d=Pf(a);return a}),f=c.C.then(function(){return e}).then(function(a){return qi(c,a)}).then(function(){return{user:Z(c),credential:d}});return this.f(f)};h.Db=function(){return Math.floor(1E9*Math.random()).toString()};
+h.signInWithPopup=function(a){if(!nf())return J(new Q("operation-not-supported-in-this-environment"));var b=this,c=xf(a.providerId),d=this.Db(),e=null;!of()&&W(this).options.authDomain&&a.isOAuthProvider&&(e=Kg(W(this).options.authDomain,W(this).options.apiKey,W(this).name,"signInViaPopup",a.providerId,a.Gb(),null,d,firebase.SDK_VERSION||null));var f=gf(e,c&&c.rb,c&&c.qb),c=this.Na().then(function(b){if(!e)return ph(b,f,"signInViaPopup",a,d)}).then(function(){return new H(function(a,c){b.Ea("signInViaPopup",
+null,new Q("cancelled-popup-request"),b.ca);b.V=a;b.Aa=c;b.ca=d;b.Ba=rh(b,"signInViaPopup",f,d)})}).then(function(a){f&&(f||window).close();return a}).N(function(a){f&&(f||window).close();throw a;});return this.f(c)};h.signInWithRedirect=function(a){if(!nf())return J(new Q("operation-not-supported-in-this-environment"));var b=this,c=this.Na().then(function(){return qh(b.s,"signInViaRedirect",a)});return this.f(c)};
+h.getRedirectResult=function(){if(!nf())return J(new Q("operation-not-supported-in-this-environment"));var a=this,b=this.Na().then(function(){return a.s.getRedirectResult()});return this.f(b)};
+var qi=function(a,b){var c={};c.apiKey=W(a).options.apiKey;c.authDomain=W(a).options.authDomain;c.appName=W(a).name;return a.C.then(function(){return Vh(c,b,a.Da)}).then(function(b){if(Z(a)&&b.uid==Z(a).uid)return Z(a).copy(b),a.Oa(b);ni(a,b);Fh(b);return a.Oa(b)}).then(function(){a.ma()})},ni=function(a,b){Z(a)&&(Dh(Z(a),a.ud),fc(Z(a),"tokenChanged",a.vd),fc(Z(a),"userDeleted",a.td));b&&(b.Vb.push(a.ud),Xb(b,"tokenChanged",a.vd),Xb(b,"userDeleted",a.td));P(a,"currentUser",b)};
+X.prototype.signOut=function(){var a=this,b=this.C.then(function(){if(!Z(a))return I();ni(a,null);return li(a.ga).then(function(){a.ma()})});return this.f(b)};
+var ri=function(a){var b=ii(a.Da,W(a).options.authDomain).then(function(b){if(a.Bc=b)b.Ca=a.Da;return Th(a.Da)});return a.f(b)},oi=function(a){var b=W(a).options.authDomain,c=vd(ri(a).then(function(){return mi(a.ga,b)}).then(function(b){return b?(b.Ca=a.Da,b.reload().then(function(){return b}).N(function(c){return"auth/network-request-failed"==c.code?b:li(a.ga)})):null}).then(function(b){ni(a,b||null);a.kb=!0;a.ma()}),function(){if(!a.jc){a.kb=!0;var b=a.ga;b.P.addListener(ki,b.$,a.Uc)}});return a.f(c)};
+X.prototype.ye=function(){var a=this;return mi(this.ga,W(this).options.authDomain).then(function(b){if(!a.jc){var c;if(c=Z(a)&&b){c=Z(a).uid;var d=b.uid;c=void 0===c||null===c||""===c||void 0===d||null===d||""===d?!1:c==d}if(c)return Z(a).copy(b),Z(a).getToken();ni(a,b);b&&(Fh(b),b.Ca=a.Da);a.s.subscribe(a);a.ma()}})};X.prototype.Oa=function(a){var b=this.ga;return b.P.set(ki,a.B(),b.$)};X.prototype.Yd=function(){this.kb=!0;this.ma();this.Oa(Z(this))};X.prototype.Xd=function(){this.signOut()};
+var si=function(a,b){return a.f(b.then(function(b){return qi(a,b)}).then(function(){return Z(a)}))};h=X.prototype;h.ee=function(a){var b=this;this.addAuthTokenListener(function(){a.next(Z(b))})};h.onAuthStateChanged=function(a,b,c){var d=this;this.kb&&firebase.Promise.resolve().then(function(){n(a)?a(Z(d)):n(a.next)&&a.next(Z(d))});return this.me(a,b,c)};h.getToken=function(a){var b=this,c=this.C.then(function(){return Z(b)?Z(b).getToken(a).then(function(a){return{accessToken:a}}):null});return this.f(c)};
+h.signInWithCustomToken=function(a){var b=this;return this.C.then(function(){return si(b,R(b.c,yg,{token:a}))}).then(function(a){Lh(a,"isAnonymous",!1);return b.Oa(a)}).then(function(){return Z(b)})};h.signInWithEmailAndPassword=function(a,b){var c=this;return this.C.then(function(){return si(c,R(c.c,Lf,{email:a,password:b}))})};h.createUserWithEmailAndPassword=function(a,b){var c=this;return this.C.then(function(){return si(c,R(c.c,vg,{email:a,password:b}))})};
+h.signInWithCredential=function(a){var b=this;return this.C.then(function(){return si(b,a.Fb(b.c))})};h.signInAnonymously=function(){var a=Z(this),b=this;return a&&a.isAnonymous?I(a):this.C.then(function(){return si(b,b.c.signInAnonymously())}).then(function(a){Lh(a,"isAnonymous",!0);return b.Oa(a)}).then(function(){return Z(b)})};var W=function(a){return a.app},Z=function(a){return a.currentUser};h=X.prototype;
+h.ma=function(){for(var a=0;a<this.cb.length;a++)if(this.cb[a])this.cb[a](Z(this)&&Z(this)._lat||null)};h.addAuthTokenListener=function(a){this.cb.push(a);var b=this;this.kb&&this.C.then(function(){a(Z(b)&&Z(b)._lat||null)})};h.removeAuthTokenListener=function(a){La(this.cb,function(b){return b==a})};h["delete"]=function(){this.jc=!0;for(var a=0;a<this.R.length;a++)this.R[a].cancel("app-deleted");this.R=[];this.ga&&(a=this.ga,a.P.removeListener(ki,a.$,this.Uc));this.s&&this.s.unsubscribe(this)};
+h.f=function(a){var b=this;this.R.push(a);vd(a,function(){Ka(b.R,a)});return a};h.fetchProvidersForEmail=function(a){return this.f(dg(this.c,a))};h.verifyPasswordResetCode=function(a){return this.checkActionCode(a).then(function(a){return a.data.email})};h.confirmPasswordReset=function(a,b){return this.f(this.c.confirmPasswordReset(a,b).then(function(){}))};h.checkActionCode=function(a){return this.f(this.c.checkActionCode(a).then(function(a){return{data:{email:a.email}}}))};h.applyActionCode=function(a){return this.f(this.c.applyActionCode(a).then(function(){}))};
+h.sendPasswordResetEmail=function(a){return this.f(this.c.sendPasswordResetEmail(a).then(function(){}))};gh(X.prototype,{applyActionCode:{name:"applyActionCode",b:[T("code")]},checkActionCode:{name:"checkActionCode",b:[T("code")]},confirmPasswordReset:{name:"confirmPasswordReset",b:[T("code"),T("newPassword")]},createUserWithEmailAndPassword:{name:"createUserWithEmailAndPassword",b:[T("email"),T("password")]},fetchProvidersForEmail:{name:"fetchProvidersForEmail",b:[T("email")]},getRedirectResult:{name:"getRedirectResult",b:[]},onAuthStateChanged:{name:"onAuthStateChanged",b:[eh($g(),ah(),"nextOrObserver"),
+ah("opt_error",!0),ah("opt_completed",!0)]},sendPasswordResetEmail:{name:"sendPasswordResetEmail",b:[T("email")]},signInAnonymously:{name:"signInAnonymously",b:[]},signInWithCredential:{name:"signInWithCredential",b:[ch()]},signInWithCustomToken:{name:"signInWithCustomToken",b:[T("token")]},signInWithEmailAndPassword:{name:"signInWithEmailAndPassword",b:[T("email"),T("password")]},signInWithPopup:{name:"signInWithPopup",b:[dh()]},signInWithRedirect:{name:"signInWithRedirect",b:[dh()]},signOut:{name:"signOut",
+b:[]},toJSON:{name:"toJSON",b:[T(null,!0)]},verifyPasswordResetCode:{name:"verifyPasswordResetCode",b:[T("code")]}});
+gh(V.prototype,{"delete":{name:"delete",b:[]},getToken:{name:"getToken",b:[{name:"opt_forceRefresh",Y:"a boolean",optional:!0,Z:function(a){return"boolean"==typeof a}}]},link:{name:"link",b:[ch()]},linkWithPopup:{name:"linkWithPopup",b:[dh()]},linkWithRedirect:{name:"linkWithRedirect",b:[dh()]},reauthenticate:{name:"reauthenticate",b:[ch()]},reload:{name:"reload",b:[]},sendEmailVerification:{name:"sendEmailVerification",b:[]},toJSON:{name:"toJSON",b:[T(null,!0)]},unlink:{name:"unlink",b:[T("provider")]},
+updateEmail:{name:"updateEmail",b:[T("email")]},updatePassword:{name:"updatePassword",b:[T("password")]},updateProfile:{name:"updateProfile",b:[$g("profile")]}});gh(H.prototype,{N:{name:"catch"},then:{name:"then"}});U(Nf,"credential",function(a,b){return new Kf(a,b)},[T("email"),T("password")]);gh(Gf.prototype,{addScope:{name:"addScope",b:[T("scope")]}});U(Gf,"credential",Gf.credential,[eh(T(),$g(),"token")]);gh(Hf.prototype,{addScope:{name:"addScope",b:[T("scope")]}});
+U(Hf,"credential",Hf.credential,[eh(T(),$g(),"token")]);gh(If.prototype,{addScope:{name:"addScope",b:[T("scope")]}});U(If,"credential",If.credential,[eh(T(),eh($g(),bh()),"idToken"),eh(T(),bh(),"accessToken",!0)]);U(Jf,"credential",Jf.credential,[eh(T(),$g(),"token"),T("secret",!0)]);
+(function(){if("undefined"!==typeof firebase&&firebase.INTERNAL&&firebase.INTERNAL.registerService){var a={Auth:X,Error:Q};U(a,"EmailAuthProvider",Nf,[]);U(a,"FacebookAuthProvider",Gf,[]);U(a,"GithubAuthProvider",Hf,[]);U(a,"GoogleAuthProvider",If,[]);U(a,"TwitterAuthProvider",Jf,[]);firebase.INTERNAL.registerService("auth",function(a,c){var d=new X(a);c({INTERNAL:{getToken:p(d.getToken,d),addAuthTokenListener:p(d.addAuthTokenListener,d),removeAuthTokenListener:p(d.removeAuthTokenListener,d)}});return d},
+a);firebase.INTERNAL.registerAppHook(function(a,c){"create"===a&&c.auth()});firebase.INTERNAL.extendNamespace({User:V})}else throw Error("Cannot find the firebase namespace; be sure to include firebase-app.js before this library.");})();})();
+(function() {var g,n=this;function p(a){return void 0!==a}function aa(){}function ba(a){a.Wb=function(){return a.af?a.af:a.af=new a}}
+function ca(a){var b=typeof a;if("object"==b)if(a){if(a instanceof Array)return"array";if(a instanceof Object)return b;var c=Object.prototype.toString.call(a);if("[object Window]"==c)return"object";if("[object Array]"==c||"number"==typeof a.length&&"undefined"!=typeof a.splice&&"undefined"!=typeof a.propertyIsEnumerable&&!a.propertyIsEnumerable("splice"))return"array";if("[object Function]"==c||"undefined"!=typeof a.call&&"undefined"!=typeof a.propertyIsEnumerable&&!a.propertyIsEnumerable("call"))return"function"}else return"null";
+else if("function"==b&&"undefined"==typeof a.call)return"object";return b}function da(a){return"array"==ca(a)}function ea(a){var b=ca(a);return"array"==b||"object"==b&&"number"==typeof a.length}function q(a){return"string"==typeof a}function fa(a){return"number"==typeof a}function ga(a){return"function"==ca(a)}function ha(a){var b=typeof a;return"object"==b&&null!=a||"function"==b}function ia(a,b,c){return a.call.apply(a.bind,arguments)}
+function ja(a,b,c){if(!a)throw Error();if(2<arguments.length){var d=Array.prototype.slice.call(arguments,2);return function(){var c=Array.prototype.slice.call(arguments);Array.prototype.unshift.apply(c,d);return a.apply(b,c)}}return function(){return a.apply(b,arguments)}}function r(a,b,c){r=Function.prototype.bind&&-1!=Function.prototype.bind.toString().indexOf("native code")?ia:ja;return r.apply(null,arguments)}
+function ka(a,b){function c(){}c.prototype=b.prototype;a.Fg=b.prototype;a.prototype=new c;a.prototype.constructor=a;a.Cg=function(a,c,f){for(var h=Array(arguments.length-2),k=2;k<arguments.length;k++)h[k-2]=arguments[k];return b.prototype[c].apply(a,h)}};function la(){this.Ya=-1};function ma(){this.Ya=-1;this.Ya=64;this.N=[];this.Wd=[];this.If=[];this.zd=[];this.zd[0]=128;for(var a=1;a<this.Ya;++a)this.zd[a]=0;this.Pd=this.ac=0;this.reset()}ka(ma,la);ma.prototype.reset=function(){this.N[0]=1732584193;this.N[1]=4023233417;this.N[2]=2562383102;this.N[3]=271733878;this.N[4]=3285377520;this.Pd=this.ac=0};
+function na(a,b,c){c||(c=0);var d=a.If;if(q(b))for(var e=0;16>e;e++)d[e]=b.charCodeAt(c)<<24|b.charCodeAt(c+1)<<16|b.charCodeAt(c+2)<<8|b.charCodeAt(c+3),c+=4;else for(e=0;16>e;e++)d[e]=b[c]<<24|b[c+1]<<16|b[c+2]<<8|b[c+3],c+=4;for(e=16;80>e;e++){var f=d[e-3]^d[e-8]^d[e-14]^d[e-16];d[e]=(f<<1|f>>>31)&4294967295}b=a.N[0];c=a.N[1];for(var h=a.N[2],k=a.N[3],m=a.N[4],l,e=0;80>e;e++)40>e?20>e?(f=k^c&(h^k),l=1518500249):(f=c^h^k,l=1859775393):60>e?(f=c&h|k&(c|h),l=2400959708):(f=c^h^k,l=3395469782),f=(b<<
+5|b>>>27)+f+m+l+d[e]&4294967295,m=k,k=h,h=(c<<30|c>>>2)&4294967295,c=b,b=f;a.N[0]=a.N[0]+b&4294967295;a.N[1]=a.N[1]+c&4294967295;a.N[2]=a.N[2]+h&4294967295;a.N[3]=a.N[3]+k&4294967295;a.N[4]=a.N[4]+m&4294967295}
+ma.prototype.update=function(a,b){if(null!=a){p(b)||(b=a.length);for(var c=b-this.Ya,d=0,e=this.Wd,f=this.ac;d<b;){if(0==f)for(;d<=c;)na(this,a,d),d+=this.Ya;if(q(a))for(;d<b;){if(e[f]=a.charCodeAt(d),++f,++d,f==this.Ya){na(this,e);f=0;break}}else for(;d<b;)if(e[f]=a[d],++f,++d,f==this.Ya){na(this,e);f=0;break}}this.ac=f;this.Pd+=b}};function t(a,b){for(var c in a)b.call(void 0,a[c],c,a)}function oa(a,b){var c={},d;for(d in a)c[d]=b.call(void 0,a[d],d,a);return c}function pa(a,b){for(var c in a)if(!b.call(void 0,a[c],c,a))return!1;return!0}function qa(a){var b=0,c;for(c in a)b++;return b}function ra(a){for(var b in a)return b}function sa(a){var b=[],c=0,d;for(d in a)b[c++]=a[d];return b}function ta(a){var b=[],c=0,d;for(d in a)b[c++]=d;return b}function ua(a,b){for(var c in a)if(a[c]==b)return!0;return!1}
+function va(a,b,c){for(var d in a)if(b.call(c,a[d],d,a))return d}function wa(a,b){var c=va(a,b,void 0);return c&&a[c]}function xa(a){for(var b in a)return!1;return!0}function ya(a){var b={},c;for(c in a)b[c]=a[c];return b};function za(a){a=String(a);if(/^\s*$/.test(a)?0:/^[\],:{}\s\u2028\u2029]*$/.test(a.replace(/\\["\\\/bfnrtu]/g,"@").replace(/"[^"\\\n\r\u2028\u2029\x00-\x08\x0a-\x1f]*"|true|false|null|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?/g,"]").replace(/(?:^|:|,)(?:[\s\u2028\u2029]*\[)+/g,"")))try{return eval("("+a+")")}catch(b){}throw Error("Invalid JSON string: "+a);}function Aa(){this.Fd=void 0}
+function Ba(a,b,c){switch(typeof b){case "string":Ca(b,c);break;case "number":c.push(isFinite(b)&&!isNaN(b)?b:"null");break;case "boolean":c.push(b);break;case "undefined":c.push("null");break;case "object":if(null==b){c.push("null");break}if(da(b)){var d=b.length;c.push("[");for(var e="",f=0;f<d;f++)c.push(e),e=b[f],Ba(a,a.Fd?a.Fd.call(b,String(f),e):e,c),e=",";c.push("]");break}c.push("{");d="";for(f in b)Object.prototype.hasOwnProperty.call(b,f)&&(e=b[f],"function"!=typeof e&&(c.push(d),Ca(f,c),
+c.push(":"),Ba(a,a.Fd?a.Fd.call(b,f,e):e,c),d=","));c.push("}");break;case "function":break;default:throw Error("Unknown type: "+typeof b);}}var Da={'"':'\\"',"\\":"\\\\","/":"\\/","\b":"\\b","\f":"\\f","\n":"\\n","\r":"\\r","\t":"\\t","\x0B":"\\u000b"},Ea=/\uffff/.test("\uffff")?/[\\\"\x00-\x1f\x7f-\uffff]/g:/[\\\"\x00-\x1f\x7f-\xff]/g;
+function Ca(a,b){b.push('"',a.replace(Ea,function(a){if(a in Da)return Da[a];var b=a.charCodeAt(0),e="\\u";16>b?e+="000":256>b?e+="00":4096>b&&(e+="0");return Da[a]=e+b.toString(16)}),'"')};var v;a:{var Fa=n.navigator;if(Fa){var Ga=Fa.userAgent;if(Ga){v=Ga;break a}}v=""};function Ha(a){if(Error.captureStackTrace)Error.captureStackTrace(this,Ha);else{var b=Error().stack;b&&(this.stack=b)}a&&(this.message=String(a))}ka(Ha,Error);Ha.prototype.name="CustomError";var w=Array.prototype,Ia=w.indexOf?function(a,b,c){return w.indexOf.call(a,b,c)}:function(a,b,c){c=null==c?0:0>c?Math.max(0,a.length+c):c;if(q(a))return q(b)&&1==b.length?a.indexOf(b,c):-1;for(;c<a.length;c++)if(c in a&&a[c]===b)return c;return-1},Ja=w.forEach?function(a,b,c){w.forEach.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=q(a)?a.split(""):a,f=0;f<d;f++)f in e&&b.call(c,e[f],f,a)},Ka=w.filter?function(a,b,c){return w.filter.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=[],f=0,h=q(a)?
+a.split(""):a,k=0;k<d;k++)if(k in h){var m=h[k];b.call(c,m,k,a)&&(e[f++]=m)}return e},La=w.map?function(a,b,c){return w.map.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=Array(d),f=q(a)?a.split(""):a,h=0;h<d;h++)h in f&&(e[h]=b.call(c,f[h],h,a));return e},Ma=w.reduce?function(a,b,c,d){for(var e=[],f=1,h=arguments.length;f<h;f++)e.push(arguments[f]);d&&(e[0]=r(b,d));return w.reduce.apply(a,e)}:function(a,b,c,d){var e=c;Ja(a,function(c,h){e=b.call(d,e,c,h,a)});return e},Na=w.every?function(a,b,
+c){return w.every.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=q(a)?a.split(""):a,f=0;f<d;f++)if(f in e&&!b.call(c,e[f],f,a))return!1;return!0};function Oa(a,b){var c=Pa(a,b,void 0);return 0>c?null:q(a)?a.charAt(c):a[c]}function Pa(a,b,c){for(var d=a.length,e=q(a)?a.split(""):a,f=0;f<d;f++)if(f in e&&b.call(c,e[f],f,a))return f;return-1}function Qa(a,b){var c=Ia(a,b);0<=c&&w.splice.call(a,c,1)}function Ra(a,b,c){return 2>=arguments.length?w.slice.call(a,b):w.slice.call(a,b,c)}
+function Sa(a,b){a.sort(b||Ta)}function Ta(a,b){return a>b?1:a<b?-1:0};var Ua=-1!=v.indexOf("Opera")||-1!=v.indexOf("OPR"),Va=-1!=v.indexOf("Trident")||-1!=v.indexOf("MSIE"),Wa=-1!=v.indexOf("Gecko")&&-1==v.toLowerCase().indexOf("webkit")&&!(-1!=v.indexOf("Trident")||-1!=v.indexOf("MSIE")),Xa=-1!=v.toLowerCase().indexOf("webkit");
+(function(){var a="",b;if(Ua&&n.opera)return a=n.opera.version,ga(a)?a():a;Wa?b=/rv\:([^\);]+)(\)|;)/:Va?b=/\b(?:MSIE|rv)[: ]([^\);]+)(\)|;)/:Xa&&(b=/WebKit\/(\S+)/);b&&(a=(a=b.exec(v))?a[1]:"");return Va&&(b=(b=n.document)?b.documentMode:void 0,b>parseFloat(a))?String(b):a})();var Ya=null,Za=null,$a=null;function ab(a,b){if(!ea(a))throw Error("encodeByteArray takes an array as a parameter");bb();for(var c=b?Za:Ya,d=[],e=0;e<a.length;e+=3){var f=a[e],h=e+1<a.length,k=h?a[e+1]:0,m=e+2<a.length,l=m?a[e+2]:0,u=f>>2,f=(f&3)<<4|k>>4,k=(k&15)<<2|l>>6,l=l&63;m||(l=64,h||(k=64));d.push(c[u],c[f],c[k],c[l])}return d.join("")}
+function bb(){if(!Ya){Ya={};Za={};$a={};for(var a=0;65>a;a++)Ya[a]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".charAt(a),Za[a]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.".charAt(a),$a[Za[a]]=a,62<=a&&($a["ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".charAt(a)]=a)}};function cb(a){n.setTimeout(function(){throw a;},0)}var db;
+function eb(){var a=n.MessageChannel;"undefined"===typeof a&&"undefined"!==typeof window&&window.postMessage&&window.addEventListener&&-1==v.indexOf("Presto")&&(a=function(){var a=document.createElement("iframe");a.style.display="none";a.src="";document.documentElement.appendChild(a);var b=a.contentWindow,a=b.document;a.open();a.write("");a.close();var c="callImmediate"+Math.random(),d="file:"==b.location.protocol?"*":b.location.protocol+"//"+b.location.host,a=r(function(a){if(("*"==d||a.origin==
+d)&&a.data==c)this.port1.onmessage()},this);b.addEventListener("message",a,!1);this.port1={};this.port2={postMessage:function(){b.postMessage(c,d)}}});if("undefined"!==typeof a&&-1==v.indexOf("Trident")&&-1==v.indexOf("MSIE")){var b=new a,c={},d=c;b.port1.onmessage=function(){if(p(c.next)){c=c.next;var a=c.Le;c.Le=null;a()}};return function(a){d.next={Le:a};d=d.next;b.port2.postMessage(0)}}return"undefined"!==typeof document&&"onreadystatechange"in document.createElement("script")?function(a){var b=
+document.createElement("script");b.onreadystatechange=function(){b.onreadystatechange=null;b.parentNode.removeChild(b);b=null;a();a=null};document.documentElement.appendChild(b)}:function(a){n.setTimeout(a,0)}};function fb(a,b){gb||hb();ib||(gb(),ib=!0);jb.push(new kb(a,b))}var gb;function hb(){if(n.Promise&&n.Promise.resolve){var a=n.Promise.resolve();gb=function(){a.then(lb)}}else gb=function(){var a=lb;!ga(n.setImmediate)||n.Window&&n.Window.prototype&&n.Window.prototype.setImmediate==n.setImmediate?(db||(db=eb()),db(a)):n.setImmediate(a)}}var ib=!1,jb=[];[].push(function(){ib=!1;jb=[]});
+function lb(){for(;jb.length;){var a=jb;jb=[];for(var b=0;b<a.length;b++){var c=a[b];try{c.Vf.call(c.scope)}catch(d){cb(d)}}}ib=!1}function kb(a,b){this.Vf=a;this.scope=b};function mb(a,b){this.L=nb;this.tf=void 0;this.Ca=this.Ha=null;this.jd=this.be=!1;if(a==ob)pb(this,qb,b);else try{var c=this;a.call(b,function(a){pb(c,qb,a)},function(a){if(!(a instanceof rb))try{if(a instanceof Error)throw a;throw Error("Promise rejected.");}catch(b){}pb(c,sb,a)})}catch(d){pb(this,sb,d)}}var nb=0,qb=2,sb=3;function ob(){}mb.prototype.then=function(a,b,c){return tb(this,ga(a)?a:null,ga(b)?b:null,c)};mb.prototype.then=mb.prototype.then;mb.prototype.$goog_Thenable=!0;g=mb.prototype;
+g.yg=function(a,b){return tb(this,null,a,b)};g.cancel=function(a){this.L==nb&&fb(function(){var b=new rb(a);ub(this,b)},this)};function ub(a,b){if(a.L==nb)if(a.Ha){var c=a.Ha;if(c.Ca){for(var d=0,e=-1,f=0,h;h=c.Ca[f];f++)if(h=h.m)if(d++,h==a&&(e=f),0<=e&&1<d)break;0<=e&&(c.L==nb&&1==d?ub(c,b):(d=c.Ca.splice(e,1)[0],vb(c,d,sb,b)))}a.Ha=null}else pb(a,sb,b)}function wb(a,b){a.Ca&&a.Ca.length||a.L!=qb&&a.L!=sb||xb(a);a.Ca||(a.Ca=[]);a.Ca.push(b)}
+function tb(a,b,c,d){var e={m:null,gf:null,jf:null};e.m=new mb(function(a,h){e.gf=b?function(c){try{var e=b.call(d,c);a(e)}catch(l){h(l)}}:a;e.jf=c?function(b){try{var e=c.call(d,b);!p(e)&&b instanceof rb?h(b):a(e)}catch(l){h(l)}}:h});e.m.Ha=a;wb(a,e);return e.m}g.Bf=function(a){this.L=nb;pb(this,qb,a)};g.Cf=function(a){this.L=nb;pb(this,sb,a)};
+function pb(a,b,c){if(a.L==nb){if(a==c)b=sb,c=new TypeError("Promise cannot resolve to itself");else{var d;if(c)try{d=!!c.$goog_Thenable}catch(e){d=!1}else d=!1;if(d){a.L=1;c.then(a.Bf,a.Cf,a);return}if(ha(c))try{var f=c.then;if(ga(f)){yb(a,c,f);return}}catch(h){b=sb,c=h}}a.tf=c;a.L=b;a.Ha=null;xb(a);b!=sb||c instanceof rb||zb(a,c)}}function yb(a,b,c){function d(b){f||(f=!0,a.Cf(b))}function e(b){f||(f=!0,a.Bf(b))}a.L=1;var f=!1;try{c.call(b,e,d)}catch(h){d(h)}}
+function xb(a){a.be||(a.be=!0,fb(a.Tf,a))}g.Tf=function(){for(;this.Ca&&this.Ca.length;){var a=this.Ca;this.Ca=null;for(var b=0;b<a.length;b++)vb(this,a[b],this.L,this.tf)}this.be=!1};function vb(a,b,c,d){if(c==qb)b.gf(d);else{if(b.m)for(;a&&a.jd;a=a.Ha)a.jd=!1;b.jf(d)}}function zb(a,b){a.jd=!0;fb(function(){a.jd&&Ab.call(null,b)})}var Ab=cb;function rb(a){Ha.call(this,a)}ka(rb,Ha);rb.prototype.name="cancel";function Bb(a,b){return Object.prototype.hasOwnProperty.call(a,b)}function x(a,b){if(Object.prototype.hasOwnProperty.call(a,b))return a[b]}function Cb(a,b){for(var c in a)Object.prototype.hasOwnProperty.call(a,c)&&b(c,a[c])};function y(a,b,c,d){var e;d<b?e="at least "+b:d>c&&(e=0===c?"none":"no more than "+c);if(e)throw Error(a+" failed: Was called with "+d+(1===d?" argument.":" arguments.")+" Expects "+e+".");}function Db(a,b,c){var d="";switch(b){case 1:d=c?"first":"First";break;case 2:d=c?"second":"Second";break;case 3:d=c?"third":"Third";break;case 4:d=c?"fourth":"Fourth";break;default:throw Error("errorPrefix called with argumentNumber > 4.  Need to update it?");}return a=a+" failed: "+(d+" argument ")}
+function A(a,b,c,d){if((!d||p(c))&&!ga(c))throw Error(Db(a,b,d)+"must be a valid function.");}function Eb(a,b,c){if(p(c)&&(!ha(c)||null===c))throw Error(Db(a,b,!0)+"must be a valid context object.");};function Fb(a){var b=[];Cb(a,function(a,d){da(d)?Ja(d,function(d){b.push(encodeURIComponent(a)+"="+encodeURIComponent(d))}):b.push(encodeURIComponent(a)+"="+encodeURIComponent(d))});return b.length?"&"+b.join("&"):""};var Gb=n.Promise||mb;mb.prototype["catch"]=mb.prototype.yg;function Hb(){var a=this;this.reject=this.resolve=null;this.ra=new Gb(function(b,c){a.resolve=b;a.reject=c})}function Ib(a,b){return function(c,d){c?a.reject(c):a.resolve(d);ga(b)&&(Jb(a.ra),1===b.length?b(c):b(c,d))}}function Jb(a){a.then(void 0,aa)};function Kb(a,b){if(!a)throw Lb(b);}function Lb(a){return Error("Firebase Database ("+firebase.SDK_VERSION+") INTERNAL ASSERT FAILED: "+a)};function Mb(a){for(var b=[],c=0,d=0;d<a.length;d++){var e=a.charCodeAt(d);55296<=e&&56319>=e&&(e-=55296,d++,Kb(d<a.length,"Surrogate pair missing trail surrogate."),e=65536+(e<<10)+(a.charCodeAt(d)-56320));128>e?b[c++]=e:(2048>e?b[c++]=e>>6|192:(65536>e?b[c++]=e>>12|224:(b[c++]=e>>18|240,b[c++]=e>>12&63|128),b[c++]=e>>6&63|128),b[c++]=e&63|128)}return b}function Nb(a){for(var b=0,c=0;c<a.length;c++){var d=a.charCodeAt(c);128>d?b++:2048>d?b+=2:55296<=d&&56319>=d?(b+=4,c++):b+=3}return b};function Ob(a){return"undefined"!==typeof JSON&&p(JSON.parse)?JSON.parse(a):za(a)}function B(a){if("undefined"!==typeof JSON&&p(JSON.stringify))a=JSON.stringify(a);else{var b=[];Ba(new Aa,a,b);a=b.join("")}return a};function Pb(a,b){this.committed=a;this.snapshot=b};function Qb(a){this.te=a;this.Bd=[];this.Rb=0;this.Yd=-1;this.Gb=null}function Rb(a,b,c){a.Yd=b;a.Gb=c;a.Yd<a.Rb&&(a.Gb(),a.Gb=null)}function Sb(a,b,c){for(a.Bd[b]=c;a.Bd[a.Rb];){var d=a.Bd[a.Rb];delete a.Bd[a.Rb];for(var e=0;e<d.length;++e)if(d[e]){var f=a;Tb(function(){f.te(d[e])})}if(a.Rb===a.Yd){a.Gb&&(clearTimeout(a.Gb),a.Gb(),a.Gb=null);break}a.Rb++}};function Ub(){this.qc={}}Ub.prototype.set=function(a,b){null==b?delete this.qc[a]:this.qc[a]=b};Ub.prototype.get=function(a){return Bb(this.qc,a)?this.qc[a]:null};Ub.prototype.remove=function(a){delete this.qc[a]};Ub.prototype.bf=!0;function Vb(a){this.vc=a;this.Cd="firebase:"}g=Vb.prototype;g.set=function(a,b){null==b?this.vc.removeItem(this.Cd+a):this.vc.setItem(this.Cd+a,B(b))};g.get=function(a){a=this.vc.getItem(this.Cd+a);return null==a?null:Ob(a)};g.remove=function(a){this.vc.removeItem(this.Cd+a)};g.bf=!1;g.toString=function(){return this.vc.toString()};function Wb(a){try{if("undefined"!==typeof window&&"undefined"!==typeof window[a]){var b=window[a];b.setItem("firebase:sentinel","cache");b.removeItem("firebase:sentinel");return new Vb(b)}}catch(c){}return new Ub}var Xb=Wb("localStorage"),Yb=Wb("sessionStorage");function Zb(a,b,c){this.type=$b;this.source=a;this.path=b;this.Ja=c}Zb.prototype.Nc=function(a){return this.path.e()?new Zb(this.source,C,this.Ja.R(a)):new Zb(this.source,D(this.path),this.Ja)};Zb.prototype.toString=function(){return"Operation("+this.path+": "+this.source.toString()+" overwrite: "+this.Ja.toString()+")"};function ac(a,b){this.type=bc;this.source=a;this.path=b}ac.prototype.Nc=function(){return this.path.e()?new ac(this.source,C):new ac(this.source,D(this.path))};ac.prototype.toString=function(){return"Operation("+this.path+": "+this.source.toString()+" listen_complete)"};function cc(a){this.He=a}cc.prototype.getToken=function(a){return this.He.INTERNAL.getToken(a).then(null,function(a){return a&&"auth/token-not-initialized"===a.code?(E("Got auth/token-not-initialized error.  Treating as null token."),null):Promise.reject(a)})};function dc(a,b){a.He.INTERNAL.addAuthTokenListener(b)};function ec(){this.Jd=F}ec.prototype.j=function(a){return this.Jd.Q(a)};ec.prototype.toString=function(){return this.Jd.toString()};function fc(a,b,c,d,e){this.host=a.toLowerCase();this.domain=this.host.substr(this.host.indexOf(".")+1);this.Sc=b;this.pe=c;this.Ag=d;this.mf=e||"";this.bb=Xb.get("host:"+a)||this.host}function gc(a,b){b!==a.bb&&(a.bb=b,"s-"===a.bb.substr(0,2)&&Xb.set("host:"+a.host,a.bb))}
+function hc(a,b,c){H("string"===typeof b,"typeof type must == string");H("object"===typeof c,"typeof params must == object");if("websocket"===b)b=(a.Sc?"wss://":"ws://")+a.bb+"/.ws?";else if("long_polling"===b)b=(a.Sc?"https://":"http://")+a.bb+"/.lp?";else throw Error("Unknown connection type: "+b);a.host!==a.bb&&(c.ns=a.pe);var d=[];t(c,function(a,b){d.push(b+"="+a)});return b+d.join("&")}
+fc.prototype.toString=function(){var a=(this.Sc?"https://":"http://")+this.host;this.mf&&(a+="<"+this.mf+">");return a};function ic(a,b){this.yf={};this.Vc=new jc(a);this.va=b;var c=1E4+2E4*Math.random();setTimeout(r(this.qf,this),Math.floor(c))}ic.prototype.qf=function(){var a=this.Vc.get(),b={},c=!1,d;for(d in a)0<a[d]&&Bb(this.yf,d)&&(b[d]=a[d],c=!0);c&&this.va.ye(b);setTimeout(r(this.qf,this),Math.floor(6E5*Math.random()))};function kc(){this.uc={}}function lc(a,b,c){p(c)||(c=1);Bb(a.uc,b)||(a.uc[b]=0);a.uc[b]+=c}kc.prototype.get=function(){return ya(this.uc)};function jc(a){this.Mf=a;this.rd=null}jc.prototype.get=function(){var a=this.Mf.get(),b=ya(a);if(this.rd)for(var c in this.rd)b[c]-=this.rd[c];this.rd=a;return b};var mc={},nc={};function oc(a){a=a.toString();mc[a]||(mc[a]=new kc);return mc[a]}function pc(a,b){var c=a.toString();nc[c]||(nc[c]=b());return nc[c]};function qc(){this.wb=[]}function rc(a,b){for(var c=null,d=0;d<b.length;d++){var e=b[d],f=e.Zb();null===c||f.ca(c.Zb())||(a.wb.push(c),c=null);null===c&&(c=new sc(f));c.add(e)}c&&a.wb.push(c)}function tc(a,b,c){rc(a,c);uc(a,function(a){return a.ca(b)})}function vc(a,b,c){rc(a,c);uc(a,function(a){return a.contains(b)||b.contains(a)})}
+function uc(a,b){for(var c=!0,d=0;d<a.wb.length;d++){var e=a.wb[d];if(e)if(e=e.Zb(),b(e)){for(var e=a.wb[d],f=0;f<e.hd.length;f++){var h=e.hd[f];if(null!==h){e.hd[f]=null;var k=h.Ub();wc&&E("event: "+h.toString());Tb(k)}}a.wb[d]=null}else c=!1}c&&(a.wb=[])}function sc(a){this.qa=a;this.hd=[]}sc.prototype.add=function(a){this.hd.push(a)};sc.prototype.Zb=function(){return this.qa};function xc(a,b,c,d){this.ae=b;this.Md=c;this.Dd=d;this.gd=a}xc.prototype.Zb=function(){var a=this.Md.xb();return"value"===this.gd?a.path:a.getParent().path};xc.prototype.ge=function(){return this.gd};xc.prototype.Ub=function(){return this.ae.Ub(this)};xc.prototype.toString=function(){return this.Zb().toString()+":"+this.gd+":"+B(this.Md.Te())};function yc(a,b,c){this.ae=a;this.error=b;this.path=c}yc.prototype.Zb=function(){return this.path};yc.prototype.ge=function(){return"cancel"};
+yc.prototype.Ub=function(){return this.ae.Ub(this)};yc.prototype.toString=function(){return this.path.toString()+":cancel"};function zc(){}zc.prototype.We=function(){return null};zc.prototype.fe=function(){return null};var Ac=new zc;function Bc(a,b,c){this.Ff=a;this.Na=b;this.yd=c}Bc.prototype.We=function(a){var b=this.Na.O;if(Cc(b,a))return b.j().R(a);b=null!=this.yd?new Dc(this.yd,!0,!1):this.Na.u();return this.Ff.rc(a,b)};Bc.prototype.fe=function(a,b,c){var d=null!=this.yd?this.yd:Ec(this.Na);a=this.Ff.Xd(d,b,1,c,a);return 0===a.length?null:a[0]};function I(a,b,c,d){this.type=a;this.Ma=b;this.Za=c;this.qe=d;this.Dd=void 0}function Fc(a){return new I(Gc,a)}var Gc="value";function Dc(a,b,c){this.A=a;this.ea=b;this.Tb=c}function Hc(a){return a.ea}function Ic(a){return a.Tb}function Jc(a,b){return b.e()?a.ea&&!a.Tb:Cc(a,J(b))}function Cc(a,b){return a.ea&&!a.Tb||a.A.Fa(b)}Dc.prototype.j=function(){return this.A};function Kc(a,b){return Lc(a.name,b.name)}function Mc(a,b){return Lc(a,b)};function K(a,b){this.name=a;this.S=b}function Nc(a,b){return new K(a,b)};function Oc(a,b){return a&&"object"===typeof a?(H(".sv"in a,"Unexpected leaf node or priority contents"),b[a[".sv"]]):a}function Pc(a,b){var c=new Qc;Rc(a,new L(""),function(a,e){Sc(c,a,Tc(e,b))});return c}function Tc(a,b){var c=a.C().H(),c=Oc(c,b),d;if(a.J()){var e=Oc(a.Ea(),b);return e!==a.Ea()||c!==a.C().H()?new Uc(e,M(c)):a}d=a;c!==a.C().H()&&(d=d.ga(new Uc(c)));a.P(N,function(a,c){var e=Tc(c,b);e!==c&&(d=d.U(a,e))});return d};var Vc=function(){var a=1;return function(){return a++}}(),H=Kb,Wc=Lb;
+function Xc(a){try{var b;if("undefined"!==typeof atob)b=atob(a);else{bb();for(var c=$a,d=[],e=0;e<a.length;){var f=c[a.charAt(e++)],h=e<a.length?c[a.charAt(e)]:0;++e;var k=e<a.length?c[a.charAt(e)]:64;++e;var m=e<a.length?c[a.charAt(e)]:64;++e;if(null==f||null==h||null==k||null==m)throw Error();d.push(f<<2|h>>4);64!=k&&(d.push(h<<4&240|k>>2),64!=m&&d.push(k<<6&192|m))}if(8192>d.length)b=String.fromCharCode.apply(null,d);else{a="";for(c=0;c<d.length;c+=8192)a+=String.fromCharCode.apply(null,Ra(d,c,
+c+8192));b=a}}return b}catch(l){E("base64Decode failed: ",l)}return null}function Yc(a){var b=Mb(a);a=new ma;a.update(b);var b=[],c=8*a.Pd;56>a.ac?a.update(a.zd,56-a.ac):a.update(a.zd,a.Ya-(a.ac-56));for(var d=a.Ya-1;56<=d;d--)a.Wd[d]=c&255,c/=256;na(a,a.Wd);for(d=c=0;5>d;d++)for(var e=24;0<=e;e-=8)b[c]=a.N[d]>>e&255,++c;return ab(b)}
+function Zc(a){for(var b="",c=0;c<arguments.length;c++)b=ea(arguments[c])?b+Zc.apply(null,arguments[c]):"object"===typeof arguments[c]?b+B(arguments[c]):b+arguments[c],b+=" ";return b}var wc=null,$c=!0;
+function ad(a,b){Kb(!b||!0===a||!1===a,"Can't turn on custom loggers persistently.");!0===a?("undefined"!==typeof console&&("function"===typeof console.log?wc=r(console.log,console):"object"===typeof console.log&&(wc=function(a){console.log(a)})),b&&Yb.set("logging_enabled",!0)):ga(a)?wc=a:(wc=null,Yb.remove("logging_enabled"))}function E(a){!0===$c&&($c=!1,null===wc&&!0===Yb.get("logging_enabled")&&ad(!0));if(wc){var b=Zc.apply(null,arguments);wc(b)}}
+function bd(a){return function(){E(a,arguments)}}function cd(a){if("undefined"!==typeof console){var b="FIREBASE INTERNAL ERROR: "+Zc.apply(null,arguments);"undefined"!==typeof console.error?console.error(b):console.log(b)}}function dd(a){var b=Zc.apply(null,arguments);throw Error("FIREBASE FATAL ERROR: "+b);}function O(a){if("undefined"!==typeof console){var b="FIREBASE WARNING: "+Zc.apply(null,arguments);"undefined"!==typeof console.warn?console.warn(b):console.log(b)}}
+function ed(a){var b,c,d,e,f,h=a;f=c=a=b="";d=!0;e="https";if(q(h)){var k=h.indexOf("//");0<=k&&(e=h.substring(0,k-1),h=h.substring(k+2));k=h.indexOf("/");-1===k&&(k=h.length);b=h.substring(0,k);f="";h=h.substring(k).split("/");for(k=0;k<h.length;k++)if(0<h[k].length){var m=h[k];try{m=decodeURIComponent(m.replace(/\+/g," "))}catch(l){}f+="/"+m}h=b.split(".");3===h.length?(a=h[1],c=h[0].toLowerCase()):2===h.length&&(a=h[0]);k=b.indexOf(":");0<=k&&(d="https"===e||"wss"===e)}"firebase"===a&&dd(b+" is no longer supported. Please use <YOUR FIREBASE>.firebaseio.com instead");
+c&&"undefined"!=c||dd("Cannot parse Firebase url. Please use https://<YOUR FIREBASE>.firebaseio.com");d||"undefined"!==typeof window&&window.location&&window.location.protocol&&-1!==window.location.protocol.indexOf("https:")&&O("Insecure Firebase access from a secure page. Please use https in calls to new Firebase().");return{kc:new fc(b,d,c,"ws"===e||"wss"===e),path:new L(f)}}function fd(a){return fa(a)&&(a!=a||a==Number.POSITIVE_INFINITY||a==Number.NEGATIVE_INFINITY)}
+function gd(a){if("complete"===document.readyState)a();else{var b=!1,c=function(){document.body?b||(b=!0,a()):setTimeout(c,Math.floor(10))};document.addEventListener?(document.addEventListener("DOMContentLoaded",c,!1),window.addEventListener("load",c,!1)):document.attachEvent&&(document.attachEvent("onreadystatechange",function(){"complete"===document.readyState&&c()}),window.attachEvent("onload",c))}}
+function Lc(a,b){if(a===b)return 0;if("[MIN_NAME]"===a||"[MAX_NAME]"===b)return-1;if("[MIN_NAME]"===b||"[MAX_NAME]"===a)return 1;var c=hd(a),d=hd(b);return null!==c?null!==d?0==c-d?a.length-b.length:c-d:-1:null!==d?1:a<b?-1:1}function id(a,b){if(b&&a in b)return b[a];throw Error("Missing required key ("+a+") in object: "+B(b));}
+function jd(a){if("object"!==typeof a||null===a)return B(a);var b=[],c;for(c in a)b.push(c);b.sort();c="{";for(var d=0;d<b.length;d++)0!==d&&(c+=","),c+=B(b[d]),c+=":",c+=jd(a[b[d]]);return c+"}"}function kd(a,b){if(a.length<=b)return[a];for(var c=[],d=0;d<a.length;d+=b)d+b>a?c.push(a.substring(d,a.length)):c.push(a.substring(d,d+b));return c}function ld(a,b){if(da(a))for(var c=0;c<a.length;++c)b(c,a[c]);else t(a,b)}
+function md(a){H(!fd(a),"Invalid JSON number");var b,c,d,e;0===a?(d=c=0,b=-Infinity===1/a?1:0):(b=0>a,a=Math.abs(a),a>=Math.pow(2,-1022)?(d=Math.min(Math.floor(Math.log(a)/Math.LN2),1023),c=d+1023,d=Math.round(a*Math.pow(2,52-d)-Math.pow(2,52))):(c=0,d=Math.round(a/Math.pow(2,-1074))));e=[];for(a=52;a;--a)e.push(d%2?1:0),d=Math.floor(d/2);for(a=11;a;--a)e.push(c%2?1:0),c=Math.floor(c/2);e.push(b?1:0);e.reverse();b=e.join("");c="";for(a=0;64>a;a+=8)d=parseInt(b.substr(a,8),2).toString(16),1===d.length&&
+(d="0"+d),c+=d;return c.toLowerCase()}var nd=/^-?\d{1,10}$/;function hd(a){return nd.test(a)&&(a=Number(a),-2147483648<=a&&2147483647>=a)?a:null}function Tb(a){try{a()}catch(b){setTimeout(function(){O("Exception was thrown by user callback.",b.stack||"");throw b;},Math.floor(0))}}function od(a,b,c){Object.defineProperty(a,b,{get:c})};function pd(a){var b={};try{var c=a.split(".");Ob(Xc(c[0])||"");b=Ob(Xc(c[1])||"");delete b.d}catch(d){}a=b;return"object"===typeof a&&!0===x(a,"admin")};var qd=null;"undefined"!==typeof MozWebSocket?qd=MozWebSocket:"undefined"!==typeof WebSocket&&(qd=WebSocket);function rd(a,b,c,d){this.Zd=a;this.f=bd(this.Zd);this.frames=this.Ac=null;this.qb=this.rb=this.Fe=0;this.Xa=oc(b);a={v:"5"};"undefined"!==typeof location&&location.href&&-1!==location.href.indexOf("firebaseio.com")&&(a.r="f");c&&(a.s=c);d&&(a.ls=d);this.Me=hc(b,"websocket",a)}var td;
+rd.prototype.open=function(a,b){this.kb=b;this.gg=a;this.f("Websocket connecting to "+this.Me);this.xc=!1;Xb.set("previous_websocket_failure",!0);try{this.La=new qd(this.Me)}catch(c){this.f("Error instantiating WebSocket.");var d=c.message||c.data;d&&this.f(d);this.fb();return}var e=this;this.La.onopen=function(){e.f("Websocket connected.");e.xc=!0};this.La.onclose=function(){e.f("Websocket connection was disconnected.");e.La=null;e.fb()};this.La.onmessage=function(a){if(null!==e.La)if(a=a.data,e.qb+=
+a.length,lc(e.Xa,"bytes_received",a.length),ud(e),null!==e.frames)vd(e,a);else{a:{H(null===e.frames,"We already have a frame buffer");if(6>=a.length){var b=Number(a);if(!isNaN(b)){e.Fe=b;e.frames=[];a=null;break a}}e.Fe=1;e.frames=[]}null!==a&&vd(e,a)}};this.La.onerror=function(a){e.f("WebSocket error.  Closing connection.");(a=a.message||a.data)&&e.f(a);e.fb()}};rd.prototype.start=function(){};
+rd.isAvailable=function(){var a=!1;if("undefined"!==typeof navigator&&navigator.userAgent){var b=navigator.userAgent.match(/Android ([0-9]{0,}\.[0-9]{0,})/);b&&1<b.length&&4.4>parseFloat(b[1])&&(a=!0)}return!a&&null!==qd&&!td};rd.responsesRequiredToBeHealthy=2;rd.healthyTimeout=3E4;g=rd.prototype;g.sd=function(){Xb.remove("previous_websocket_failure")};function vd(a,b){a.frames.push(b);if(a.frames.length==a.Fe){var c=a.frames.join("");a.frames=null;c=Ob(c);a.gg(c)}}
+g.send=function(a){ud(this);a=B(a);this.rb+=a.length;lc(this.Xa,"bytes_sent",a.length);a=kd(a,16384);1<a.length&&wd(this,String(a.length));for(var b=0;b<a.length;b++)wd(this,a[b])};g.Tc=function(){this.Bb=!0;this.Ac&&(clearInterval(this.Ac),this.Ac=null);this.La&&(this.La.close(),this.La=null)};g.fb=function(){this.Bb||(this.f("WebSocket is closing itself"),this.Tc(),this.kb&&(this.kb(this.xc),this.kb=null))};g.close=function(){this.Bb||(this.f("WebSocket is being closed"),this.Tc())};
+function ud(a){clearInterval(a.Ac);a.Ac=setInterval(function(){a.La&&wd(a,"0");ud(a)},Math.floor(45E3))}function wd(a,b){try{a.La.send(b)}catch(c){a.f("Exception thrown from WebSocket.send():",c.message||c.data,"Closing connection."),setTimeout(r(a.fb,a),0)}};function xd(a,b,c){this.f=bd("p:rest:");this.M=a;this.Hb=b;this.Vd=c;this.$={}}function yd(a,b){if(p(b))return"tag$"+b;H(zd(a.n),"should have a tag if it's not a default query.");return a.path.toString()}g=xd.prototype;
+g.cf=function(a,b,c,d){var e=a.path.toString();this.f("Listen called for "+e+" "+a.ya());var f=yd(a,c),h={};this.$[f]=h;a=Ad(a.n);var k=this;Bd(this,e+".json",a,function(a,b){var u=b;404===a&&(a=u=null);null===a&&k.Hb(e,u,!1,c);x(k.$,f)===h&&d(a?401==a?"permission_denied":"rest_error:"+a:"ok",null)})};g.Df=function(a,b){var c=yd(a,b);delete this.$[c]};g.pf=function(){};g.re=function(){};g.ff=function(){};g.xd=function(){};g.put=function(){};g.df=function(){};g.ye=function(){};
+function Bd(a,b,c,d){c=c||{};c.format="export";a.Vd.getToken(!1).then(function(e){(e=e&&e.accessToken)&&(c.auth=e);var f=(a.M.Sc?"https://":"http://")+a.M.host+b+"?"+Fb(c);a.f("Sending REST request for "+f);var h=new XMLHttpRequest;h.onreadystatechange=function(){if(d&&4===h.readyState){a.f("REST Response for "+f+" received. status:",h.status,"response:",h.responseText);var b=null;if(200<=h.status&&300>h.status){try{b=Ob(h.responseText)}catch(c){O("Failed to parse JSON response for "+f+": "+h.responseText)}d(null,
+b)}else 401!==h.status&&404!==h.status&&O("Got unsuccessful REST response for "+f+" Status: "+h.status),d(h.status);d=null}};h.open("GET",f,!0);h.send()})};function Cd(a,b,c){this.type=Dd;this.source=a;this.path=b;this.children=c}Cd.prototype.Nc=function(a){if(this.path.e())return a=this.children.subtree(new L(a)),a.e()?null:a.value?new Zb(this.source,C,a.value):new Cd(this.source,C,a);H(J(this.path)===a,"Can't get a merge for a child not on the path of the operation");return new Cd(this.source,D(this.path),this.children)};Cd.prototype.toString=function(){return"Operation("+this.path+": "+this.source.toString()+" merge: "+this.children.toString()+")"};function Ed(){this.hb={}}
+function Fd(a,b){var c=b.type,d=b.Za;H("child_added"==c||"child_changed"==c||"child_removed"==c,"Only child changes supported for tracking");H(".priority"!==d,"Only non-priority child changes can be tracked.");var e=x(a.hb,d);if(e){var f=e.type;if("child_added"==c&&"child_removed"==f)a.hb[d]=new I("child_changed",b.Ma,d,e.Ma);else if("child_removed"==c&&"child_added"==f)delete a.hb[d];else if("child_removed"==c&&"child_changed"==f)a.hb[d]=new I("child_removed",e.qe,d);else if("child_changed"==c&&
+"child_added"==f)a.hb[d]=new I("child_added",b.Ma,d);else if("child_changed"==c&&"child_changed"==f)a.hb[d]=new I("child_changed",b.Ma,d,e.qe);else throw Wc("Illegal combination of changes: "+b+" occurred after "+e);}else a.hb[d]=b};function Gd(a){this.W=a;this.g=a.n.g}function Hd(a,b,c,d){var e=[],f=[];Ja(b,function(b){"child_changed"===b.type&&a.g.nd(b.qe,b.Ma)&&f.push(new I("child_moved",b.Ma,b.Za))});Id(a,e,"child_removed",b,d,c);Id(a,e,"child_added",b,d,c);Id(a,e,"child_moved",f,d,c);Id(a,e,"child_changed",b,d,c);Id(a,e,Gc,b,d,c);return e}function Id(a,b,c,d,e,f){d=Ka(d,function(a){return a.type===c});Sa(d,r(a.Nf,a));Ja(d,function(c){var d=Jd(a,c,f);Ja(e,function(e){e.sf(c.type)&&b.push(e.createEvent(d,a.W))})})}
+function Jd(a,b,c){"value"!==b.type&&"child_removed"!==b.type&&(b.Dd=c.Ye(b.Za,b.Ma,a.g));return b}Gd.prototype.Nf=function(a,b){if(null==a.Za||null==b.Za)throw Wc("Should only compare child_ events.");return this.g.compare(new K(a.Za,a.Ma),new K(b.Za,b.Ma))};function Kd(a,b){this.Sd=a;this.Lf=b}function Ld(a){this.V=a}
+Ld.prototype.gb=function(a,b,c,d){var e=new Ed,f;if(b.type===$b)b.source.ee?c=Md(this,a,b.path,b.Ja,c,d,e):(H(b.source.Ve,"Unknown source."),f=b.source.Ee||Ic(a.u())&&!b.path.e(),c=Nd(this,a,b.path,b.Ja,c,d,f,e));else if(b.type===Dd)b.source.ee?c=Od(this,a,b.path,b.children,c,d,e):(H(b.source.Ve,"Unknown source."),f=b.source.Ee||Ic(a.u()),c=Pd(this,a,b.path,b.children,c,d,f,e));else if(b.type===Qd)if(b.Id)if(b=b.path,null!=c.mc(b))c=a;else{f=new Bc(c,a,d);d=a.O.j();if(b.e()||".priority"===J(b))Hc(a.u())?
+b=c.Ba(Ec(a)):(b=a.u().j(),H(b instanceof P,"serverChildren would be complete if leaf node"),b=c.sc(b)),b=this.V.za(d,b,e);else{var h=J(b),k=c.rc(h,a.u());null==k&&Cc(a.u(),h)&&(k=d.R(h));b=null!=k?this.V.F(d,h,k,D(b),f,e):a.O.j().Fa(h)?this.V.F(d,h,F,D(b),f,e):d;b.e()&&Hc(a.u())&&(d=c.Ba(Ec(a)),d.J()&&(b=this.V.za(b,d,e)))}d=Hc(a.u())||null!=c.mc(C);c=Rd(a,b,d,this.V.Qa())}else c=Sd(this,a,b.path,b.Pb,c,d,e);else if(b.type===bc)d=b.path,b=a.u(),f=b.j(),h=b.ea||d.e(),c=Td(this,new Ud(a.O,new Dc(f,
+h,b.Tb)),d,c,Ac,e);else throw Wc("Unknown operation type: "+b.type);e=sa(e.hb);d=c;b=d.O;b.ea&&(f=b.j().J()||b.j().e(),h=Vd(a),(0<e.length||!a.O.ea||f&&!b.j().ca(h)||!b.j().C().ca(h.C()))&&e.push(Fc(Vd(d))));return new Kd(c,e)};
+function Td(a,b,c,d,e,f){var h=b.O;if(null!=d.mc(c))return b;var k;if(c.e())H(Hc(b.u()),"If change path is empty, we must have complete server data"),Ic(b.u())?(e=Ec(b),d=d.sc(e instanceof P?e:F)):d=d.Ba(Ec(b)),f=a.V.za(b.O.j(),d,f);else{var m=J(c);if(".priority"==m)H(1==Wd(c),"Can't have a priority with additional path components"),f=h.j(),k=b.u().j(),d=d.$c(c,f,k),f=null!=d?a.V.ga(f,d):h.j();else{var l=D(c);Cc(h,m)?(k=b.u().j(),d=d.$c(c,h.j(),k),d=null!=d?h.j().R(m).F(l,d):h.j().R(m)):d=d.rc(m,
+b.u());f=null!=d?a.V.F(h.j(),m,d,l,e,f):h.j()}}return Rd(b,f,h.ea||c.e(),a.V.Qa())}function Nd(a,b,c,d,e,f,h,k){var m=b.u();h=h?a.V:a.V.Vb();if(c.e())d=h.za(m.j(),d,null);else if(h.Qa()&&!m.Tb)d=m.j().F(c,d),d=h.za(m.j(),d,null);else{var l=J(c);if(!Jc(m,c)&&1<Wd(c))return b;var u=D(c);d=m.j().R(l).F(u,d);d=".priority"==l?h.ga(m.j(),d):h.F(m.j(),l,d,u,Ac,null)}m=m.ea||c.e();b=new Ud(b.O,new Dc(d,m,h.Qa()));return Td(a,b,c,e,new Bc(e,b,f),k)}
+function Md(a,b,c,d,e,f,h){var k=b.O;e=new Bc(e,b,f);if(c.e())h=a.V.za(b.O.j(),d,h),a=Rd(b,h,!0,a.V.Qa());else if(f=J(c),".priority"===f)h=a.V.ga(b.O.j(),d),a=Rd(b,h,k.ea,k.Tb);else{c=D(c);var m=k.j().R(f);if(!c.e()){var l=e.We(f);d=null!=l?".priority"===Xd(c)&&l.Q(c.parent()).e()?l:l.F(c,d):F}m.ca(d)?a=b:(h=a.V.F(k.j(),f,d,c,e,h),a=Rd(b,h,k.ea,a.V.Qa()))}return a}
+function Od(a,b,c,d,e,f,h){var k=b;Yd(d,function(d,l){var u=c.m(d);Cc(b.O,J(u))&&(k=Md(a,k,u,l,e,f,h))});Yd(d,function(d,l){var u=c.m(d);Cc(b.O,J(u))||(k=Md(a,k,u,l,e,f,h))});return k}function Zd(a,b){Yd(b,function(b,d){a=a.F(b,d)});return a}
+function Pd(a,b,c,d,e,f,h,k){if(b.u().j().e()&&!Hc(b.u()))return b;var m=b;c=c.e()?d:$d(Q,c,d);var l=b.u().j();c.children.ia(function(c,d){if(l.Fa(c)){var G=b.u().j().R(c),G=Zd(G,d);m=Nd(a,m,new L(c),G,e,f,h,k)}});c.children.ia(function(c,d){var G=!Cc(b.u(),c)&&null==d.value;l.Fa(c)||G||(G=b.u().j().R(c),G=Zd(G,d),m=Nd(a,m,new L(c),G,e,f,h,k))});return m}
+function Sd(a,b,c,d,e,f,h){if(null!=e.mc(c))return b;var k=Ic(b.u()),m=b.u();if(null!=d.value){if(c.e()&&m.ea||Jc(m,c))return Nd(a,b,c,m.j().Q(c),e,f,k,h);if(c.e()){var l=Q;m.j().P(ae,function(a,b){l=l.set(new L(a),b)});return Pd(a,b,c,l,e,f,k,h)}return b}l=Q;Yd(d,function(a){var b=c.m(a);Jc(m,b)&&(l=l.set(a,m.j().Q(b)))});return Pd(a,b,c,l,e,f,k,h)};function be(a){this.g=a}g=be.prototype;g.F=function(a,b,c,d,e,f){H(a.zc(this.g),"A node must be indexed if only a child is updated");e=a.R(b);if(e.Q(d).ca(c.Q(d))&&e.e()==c.e())return a;null!=f&&(c.e()?a.Fa(b)?Fd(f,new I("child_removed",e,b)):H(a.J(),"A child remove without an old child only makes sense on a leaf node"):e.e()?Fd(f,new I("child_added",c,b)):Fd(f,new I("child_changed",c,b,e)));return a.J()&&c.e()?a:a.U(b,c).ob(this.g)};
+g.za=function(a,b,c){null!=c&&(a.J()||a.P(N,function(a,e){b.Fa(a)||Fd(c,new I("child_removed",e,a))}),b.J()||b.P(N,function(b,e){if(a.Fa(b)){var f=a.R(b);f.ca(e)||Fd(c,new I("child_changed",e,b,f))}else Fd(c,new I("child_added",e,b))}));return b.ob(this.g)};g.ga=function(a,b){return a.e()?F:a.ga(b)};g.Qa=function(){return!1};g.Vb=function(){return this};function ce(a){this.he=new be(a.g);this.g=a.g;var b;a.ka?(b=de(a),b=a.g.Fc(ee(a),b)):b=a.g.Ic();this.Uc=b;a.na?(b=fe(a),a=a.g.Fc(ge(a),b)):a=a.g.Gc();this.wc=a}g=ce.prototype;g.matches=function(a){return 0>=this.g.compare(this.Uc,a)&&0>=this.g.compare(a,this.wc)};g.F=function(a,b,c,d,e,f){this.matches(new K(b,c))||(c=F);return this.he.F(a,b,c,d,e,f)};
+g.za=function(a,b,c){b.J()&&(b=F);var d=b.ob(this.g),d=d.ga(F),e=this;b.P(N,function(a,b){e.matches(new K(a,b))||(d=d.U(a,F))});return this.he.za(a,d,c)};g.ga=function(a){return a};g.Qa=function(){return!0};g.Vb=function(){return this.he};function he(a){this.sa=new ce(a);this.g=a.g;H(a.xa,"Only valid if limit has been set");this.oa=a.oa;this.Jb=!ie(a)}g=he.prototype;g.F=function(a,b,c,d,e,f){this.sa.matches(new K(b,c))||(c=F);return a.R(b).ca(c)?a:a.Fb()<this.oa?this.sa.Vb().F(a,b,c,d,e,f):je(this,a,b,c,e,f)};
+g.za=function(a,b,c){var d;if(b.J()||b.e())d=F.ob(this.g);else if(2*this.oa<b.Fb()&&b.zc(this.g)){d=F.ob(this.g);b=this.Jb?b.$b(this.sa.wc,this.g):b.Yb(this.sa.Uc,this.g);for(var e=0;0<b.Sa.length&&e<this.oa;){var f=R(b),h;if(h=this.Jb?0>=this.g.compare(this.sa.Uc,f):0>=this.g.compare(f,this.sa.wc))d=d.U(f.name,f.S),e++;else break}}else{d=b.ob(this.g);d=d.ga(F);var k,m,l;if(this.Jb){b=d.Ze(this.g);k=this.sa.wc;m=this.sa.Uc;var u=ke(this.g);l=function(a,b){return u(b,a)}}else b=d.Xb(this.g),k=this.sa.Uc,
+m=this.sa.wc,l=ke(this.g);for(var e=0,z=!1;0<b.Sa.length;)f=R(b),!z&&0>=l(k,f)&&(z=!0),(h=z&&e<this.oa&&0>=l(f,m))?e++:d=d.U(f.name,F)}return this.sa.Vb().za(a,d,c)};g.ga=function(a){return a};g.Qa=function(){return!0};g.Vb=function(){return this.sa.Vb()};
+function je(a,b,c,d,e,f){var h;if(a.Jb){var k=ke(a.g);h=function(a,b){return k(b,a)}}else h=ke(a.g);H(b.Fb()==a.oa,"");var m=new K(c,d),l=a.Jb?le(b,a.g):me(b,a.g),u=a.sa.matches(m);if(b.Fa(c)){for(var z=b.R(c),l=e.fe(a.g,l,a.Jb);null!=l&&(l.name==c||b.Fa(l.name));)l=e.fe(a.g,l,a.Jb);e=null==l?1:h(l,m);if(u&&!d.e()&&0<=e)return null!=f&&Fd(f,new I("child_changed",d,c,z)),b.U(c,d);null!=f&&Fd(f,new I("child_removed",z,c));b=b.U(c,F);return null!=l&&a.sa.matches(l)?(null!=f&&Fd(f,new I("child_added",
+l.S,l.name)),b.U(l.name,l.S)):b}return d.e()?b:u&&0<=h(l,m)?(null!=f&&(Fd(f,new I("child_removed",l.S,l.name)),Fd(f,new I("child_added",d,c))),b.U(c,d).U(l.name,F)):b};function Uc(a,b){this.B=a;H(p(this.B)&&null!==this.B,"LeafNode shouldn't be created with null/undefined value.");this.aa=b||F;ne(this.aa);this.Eb=null}var oe=["object","boolean","number","string"];g=Uc.prototype;g.J=function(){return!0};g.C=function(){return this.aa};g.ga=function(a){return new Uc(this.B,a)};g.R=function(a){return".priority"===a?this.aa:F};g.Q=function(a){return a.e()?this:".priority"===J(a)?this.aa:F};g.Fa=function(){return!1};g.Ye=function(){return null};
+g.U=function(a,b){return".priority"===a?this.ga(b):b.e()&&".priority"!==a?this:F.U(a,b).ga(this.aa)};g.F=function(a,b){var c=J(a);if(null===c)return b;if(b.e()&&".priority"!==c)return this;H(".priority"!==c||1===Wd(a),".priority must be the last token in a path");return this.U(c,F.F(D(a),b))};g.e=function(){return!1};g.Fb=function(){return 0};g.P=function(){return!1};g.H=function(a){return a&&!this.C().e()?{".value":this.Ea(),".priority":this.C().H()}:this.Ea()};
+g.hash=function(){if(null===this.Eb){var a="";this.aa.e()||(a+="priority:"+pe(this.aa.H())+":");var b=typeof this.B,a=a+(b+":"),a="number"===b?a+md(this.B):a+this.B;this.Eb=Yc(a)}return this.Eb};g.Ea=function(){return this.B};g.tc=function(a){if(a===F)return 1;if(a instanceof P)return-1;H(a.J(),"Unknown node type");var b=typeof a.B,c=typeof this.B,d=Ia(oe,b),e=Ia(oe,c);H(0<=d,"Unknown leaf type: "+b);H(0<=e,"Unknown leaf type: "+c);return d===e?"object"===c?0:this.B<a.B?-1:this.B===a.B?0:1:e-d};
+g.ob=function(){return this};g.zc=function(){return!0};g.ca=function(a){return a===this?!0:a.J()?this.B===a.B&&this.aa.ca(a.aa):!1};g.toString=function(){return B(this.H(!0))};function qe(){}var re={};function ke(a){return r(a.compare,a)}qe.prototype.nd=function(a,b){return 0!==this.compare(new K("[MIN_NAME]",a),new K("[MIN_NAME]",b))};qe.prototype.Ic=function(){return se};function te(a){H(!a.e()&&".priority"!==J(a),"Can't create PathIndex with empty path or .priority key");this.cc=a}ka(te,qe);g=te.prototype;g.yc=function(a){return!a.Q(this.cc).e()};g.compare=function(a,b){var c=a.S.Q(this.cc),d=b.S.Q(this.cc),c=c.tc(d);return 0===c?Lc(a.name,b.name):c};
+g.Fc=function(a,b){var c=M(a),c=F.F(this.cc,c);return new K(b,c)};g.Gc=function(){var a=F.F(this.cc,ue);return new K("[MAX_NAME]",a)};g.toString=function(){return this.cc.slice().join("/")};function ve(){}ka(ve,qe);g=ve.prototype;g.compare=function(a,b){var c=a.S.C(),d=b.S.C(),c=c.tc(d);return 0===c?Lc(a.name,b.name):c};g.yc=function(a){return!a.C().e()};g.nd=function(a,b){return!a.C().ca(b.C())};g.Ic=function(){return se};g.Gc=function(){return new K("[MAX_NAME]",new Uc("[PRIORITY-POST]",ue))};
+g.Fc=function(a,b){var c=M(a);return new K(b,new Uc("[PRIORITY-POST]",c))};g.toString=function(){return".priority"};var N=new ve;function we(){}ka(we,qe);g=we.prototype;g.compare=function(a,b){return Lc(a.name,b.name)};g.yc=function(){throw Wc("KeyIndex.isDefinedOn not expected to be called.");};g.nd=function(){return!1};g.Ic=function(){return se};g.Gc=function(){return new K("[MAX_NAME]",F)};g.Fc=function(a){H(q(a),"KeyIndex indexValue must always be a string.");return new K(a,F)};g.toString=function(){return".key"};
+var ae=new we;function xe(){}ka(xe,qe);g=xe.prototype;g.compare=function(a,b){var c=a.S.tc(b.S);return 0===c?Lc(a.name,b.name):c};g.yc=function(){return!0};g.nd=function(a,b){return!a.ca(b)};g.Ic=function(){return se};g.Gc=function(){return ye};g.Fc=function(a,b){var c=M(a);return new K(b,c)};g.toString=function(){return".value"};var ze=new xe;function Ae(){this.Sb=this.na=this.Lb=this.ka=this.xa=!1;this.oa=0;this.oc="";this.ec=null;this.Ab="";this.bc=null;this.yb="";this.g=N}var Be=new Ae;function ie(a){return""===a.oc?a.ka:"l"===a.oc}function ee(a){H(a.ka,"Only valid if start has been set");return a.ec}function de(a){H(a.ka,"Only valid if start has been set");return a.Lb?a.Ab:"[MIN_NAME]"}function ge(a){H(a.na,"Only valid if end has been set");return a.bc}
+function fe(a){H(a.na,"Only valid if end has been set");return a.Sb?a.yb:"[MAX_NAME]"}function Ce(a){var b=new Ae;b.xa=a.xa;b.oa=a.oa;b.ka=a.ka;b.ec=a.ec;b.Lb=a.Lb;b.Ab=a.Ab;b.na=a.na;b.bc=a.bc;b.Sb=a.Sb;b.yb=a.yb;b.g=a.g;return b}g=Ae.prototype;g.ne=function(a){var b=Ce(this);b.xa=!0;b.oa=a;b.oc="l";return b};g.oe=function(a){var b=Ce(this);b.xa=!0;b.oa=a;b.oc="r";return b};g.Nd=function(a,b){var c=Ce(this);c.ka=!0;p(a)||(a=null);c.ec=a;null!=b?(c.Lb=!0,c.Ab=b):(c.Lb=!1,c.Ab="");return c};
+g.fd=function(a,b){var c=Ce(this);c.na=!0;p(a)||(a=null);c.bc=a;p(b)?(c.Sb=!0,c.yb=b):(c.Eg=!1,c.yb="");return c};function De(a,b){var c=Ce(a);c.g=b;return c}function Ee(a){var b={};a.ka&&(b.sp=a.ec,a.Lb&&(b.sn=a.Ab));a.na&&(b.ep=a.bc,a.Sb&&(b.en=a.yb));if(a.xa){b.l=a.oa;var c=a.oc;""===c&&(c=ie(a)?"l":"r");b.vf=c}a.g!==N&&(b.i=a.g.toString());return b}function S(a){return!(a.ka||a.na||a.xa)}function zd(a){return S(a)&&a.g==N}
+function Ad(a){var b={};if(zd(a))return b;var c;a.g===N?c="$priority":a.g===ze?c="$value":a.g===ae?c="$key":(H(a.g instanceof te,"Unrecognized index type!"),c=a.g.toString());b.orderBy=B(c);a.ka&&(b.startAt=B(a.ec),a.Lb&&(b.startAt+=","+B(a.Ab)));a.na&&(b.endAt=B(a.bc),a.Sb&&(b.endAt+=","+B(a.yb)));a.xa&&(ie(a)?b.limitToFirst=a.oa:b.limitToLast=a.oa);return b}g.toString=function(){return B(Ee(this))};function Fe(a,b){this.od=a;this.dc=b}Fe.prototype.get=function(a){var b=x(this.od,a);if(!b)throw Error("No index defined for "+a);return b===re?null:b};function Ge(a,b,c){var d=oa(a.od,function(d,f){var h=x(a.dc,f);H(h,"Missing index implementation for "+f);if(d===re){if(h.yc(b.S)){for(var k=[],m=c.Xb(Nc),l=R(m);l;)l.name!=b.name&&k.push(l),l=R(m);k.push(b);return He(k,ke(h))}return re}h=c.get(b.name);k=d;h&&(k=k.remove(new K(b.name,h)));return k.Ra(b,b.S)});return new Fe(d,a.dc)}
+function Ie(a,b,c){var d=oa(a.od,function(a){if(a===re)return a;var d=c.get(b.name);return d?a.remove(new K(b.name,d)):a});return new Fe(d,a.dc)}var Je=new Fe({".priority":re},{".priority":N});function Ke(){this.set={}}g=Ke.prototype;g.add=function(a,b){this.set[a]=null!==b?b:!0};g.contains=function(a){return Bb(this.set,a)};g.get=function(a){return this.contains(a)?this.set[a]:void 0};g.remove=function(a){delete this.set[a]};g.clear=function(){this.set={}};g.e=function(){return xa(this.set)};g.count=function(){return qa(this.set)};function Le(a,b){t(a.set,function(a,d){b(d,a)})}g.keys=function(){var a=[];t(this.set,function(b,c){a.push(c)});return a};function Me(a,b,c,d){this.Zd=a;this.f=bd(a);this.kc=b;this.qb=this.rb=0;this.Xa=oc(b);this.Af=c;this.xc=!1;this.Db=d;this.Yc=function(a){return hc(b,"long_polling",a)}}var Ne,Oe;
+Me.prototype.open=function(a,b){this.Pe=0;this.ja=b;this.ef=new Qb(a);this.Bb=!1;var c=this;this.tb=setTimeout(function(){c.f("Timed out trying to connect.");c.fb();c.tb=null},Math.floor(3E4));gd(function(){if(!c.Bb){c.Wa=new Pe(function(a,b,d,k,m){Qe(c,arguments);if(c.Wa)if(c.tb&&(clearTimeout(c.tb),c.tb=null),c.xc=!0,"start"==a)c.id=b,c.lf=d;else if("close"===a)b?(c.Wa.Kd=!1,Rb(c.ef,b,function(){c.fb()})):c.fb();else throw Error("Unrecognized command received: "+a);},function(a,b){Qe(c,arguments);
+Sb(c.ef,a,b)},function(){c.fb()},c.Yc);var a={start:"t"};a.ser=Math.floor(1E8*Math.random());c.Wa.Qd&&(a.cb=c.Wa.Qd);a.v="5";c.Af&&(a.s=c.Af);c.Db&&(a.ls=c.Db);"undefined"!==typeof location&&location.href&&-1!==location.href.indexOf("firebaseio.com")&&(a.r="f");a=c.Yc(a);c.f("Connecting via long-poll to "+a);Re(c.Wa,a,function(){})}})};
+Me.prototype.start=function(){var a=this.Wa,b=this.lf;a.eg=this.id;a.fg=b;for(a.Ud=!0;Se(a););a=this.id;b=this.lf;this.gc=document.createElement("iframe");var c={dframe:"t"};c.id=a;c.pw=b;this.gc.src=this.Yc(c);this.gc.style.display="none";document.body.appendChild(this.gc)};
+Me.isAvailable=function(){return Ne||!Oe&&"undefined"!==typeof document&&null!=document.createElement&&!("object"===typeof window&&window.chrome&&window.chrome.extension&&!/^chrome/.test(window.location.href))&&!("object"===typeof Windows&&"object"===typeof Windows.Bg)&&!0};g=Me.prototype;g.sd=function(){};g.Tc=function(){this.Bb=!0;this.Wa&&(this.Wa.close(),this.Wa=null);this.gc&&(document.body.removeChild(this.gc),this.gc=null);this.tb&&(clearTimeout(this.tb),this.tb=null)};
+g.fb=function(){this.Bb||(this.f("Longpoll is closing itself"),this.Tc(),this.ja&&(this.ja(this.xc),this.ja=null))};g.close=function(){this.Bb||(this.f("Longpoll is being closed."),this.Tc())};g.send=function(a){a=B(a);this.rb+=a.length;lc(this.Xa,"bytes_sent",a.length);a=Mb(a);a=ab(a,!0);a=kd(a,1840);for(var b=0;b<a.length;b++){var c=this.Wa;c.Qc.push({tg:this.Pe,zg:a.length,Re:a[b]});c.Ud&&Se(c);this.Pe++}};function Qe(a,b){var c=B(b).length;a.qb+=c;lc(a.Xa,"bytes_received",c)}
+function Pe(a,b,c,d){this.Yc=d;this.kb=c;this.ve=new Ke;this.Qc=[];this.$d=Math.floor(1E8*Math.random());this.Kd=!0;this.Qd=Vc();window["pLPCommand"+this.Qd]=a;window["pRTLPCB"+this.Qd]=b;a=document.createElement("iframe");a.style.display="none";if(document.body){document.body.appendChild(a);try{a.contentWindow.document||E("No IE domain setting required")}catch(e){a.src="javascript:void((function(){document.open();document.domain='"+document.domain+"';document.close();})())"}}else throw"Document body has not initialized. Wait to initialize Firebase until after the document is ready.";
+a.contentDocument?a.ib=a.contentDocument:a.contentWindow?a.ib=a.contentWindow.document:a.document&&(a.ib=a.document);this.Ga=a;a="";this.Ga.src&&"javascript:"===this.Ga.src.substr(0,11)&&(a='<script>document.domain="'+document.domain+'";\x3c/script>');a="<html><body>"+a+"</body></html>";try{this.Ga.ib.open(),this.Ga.ib.write(a),this.Ga.ib.close()}catch(f){E("frame writing exception"),f.stack&&E(f.stack),E(f)}}
+Pe.prototype.close=function(){this.Ud=!1;if(this.Ga){this.Ga.ib.body.innerHTML="";var a=this;setTimeout(function(){null!==a.Ga&&(document.body.removeChild(a.Ga),a.Ga=null)},Math.floor(0))}var b=this.kb;b&&(this.kb=null,b())};
+function Se(a){if(a.Ud&&a.Kd&&a.ve.count()<(0<a.Qc.length?2:1)){a.$d++;var b={};b.id=a.eg;b.pw=a.fg;b.ser=a.$d;for(var b=a.Yc(b),c="",d=0;0<a.Qc.length;)if(1870>=a.Qc[0].Re.length+30+c.length){var e=a.Qc.shift(),c=c+"&seg"+d+"="+e.tg+"&ts"+d+"="+e.zg+"&d"+d+"="+e.Re;d++}else break;Te(a,b+c,a.$d);return!0}return!1}function Te(a,b,c){function d(){a.ve.remove(c);Se(a)}a.ve.add(c,1);var e=setTimeout(d,Math.floor(25E3));Re(a,b,function(){clearTimeout(e);d()})}
+function Re(a,b,c){setTimeout(function(){try{if(a.Kd){var d=a.Ga.ib.createElement("script");d.type="text/javascript";d.async=!0;d.src=b;d.onload=d.onreadystatechange=function(){var a=d.readyState;a&&"loaded"!==a&&"complete"!==a||(d.onload=d.onreadystatechange=null,d.parentNode&&d.parentNode.removeChild(d),c())};d.onerror=function(){E("Long-poll script failed to load: "+b);a.Kd=!1;a.close()};a.Ga.ib.body.appendChild(d)}}catch(e){}},Math.floor(1))};function Ue(a){Ve(this,a)}var We=[Me,rd];function Ve(a,b){var c=rd&&rd.isAvailable(),d=c&&!(Xb.bf||!0===Xb.get("previous_websocket_failure"));b.Ag&&(c||O("wss:// URL used, but browser isn't known to support websockets.  Trying anyway."),d=!0);if(d)a.Wc=[rd];else{var e=a.Wc=[];ld(We,function(a,b){b&&b.isAvailable()&&e.push(b)})}}function Xe(a){if(0<a.Wc.length)return a.Wc[0];throw Error("No transports available");};function Ye(a,b,c,d,e,f,h){this.id=a;this.f=bd("c:"+this.id+":");this.te=c;this.Mc=d;this.ja=e;this.se=f;this.M=b;this.Ad=[];this.Ne=0;this.zf=new Ue(b);this.L=0;this.Db=h;this.f("Connection created");Ze(this)}
+function Ze(a){var b=Xe(a.zf);a.I=new b("c:"+a.id+":"+a.Ne++,a.M,void 0,a.Db);a.xe=b.responsesRequiredToBeHealthy||0;var c=$e(a,a.I),d=af(a,a.I);a.Xc=a.I;a.Rc=a.I;a.D=null;a.Cb=!1;setTimeout(function(){a.I&&a.I.open(c,d)},Math.floor(0));b=b.healthyTimeout||0;0<b&&(a.md=setTimeout(function(){a.md=null;a.Cb||(a.I&&102400<a.I.qb?(a.f("Connection exceeded healthy timeout but has received "+a.I.qb+" bytes.  Marking connection healthy."),a.Cb=!0,a.I.sd()):a.I&&10240<a.I.rb?a.f("Connection exceeded healthy timeout but has sent "+
+a.I.rb+" bytes.  Leaving connection alive."):(a.f("Closing unhealthy connection after timeout."),a.close()))},Math.floor(b)))}function af(a,b){return function(c){b===a.I?(a.I=null,c||0!==a.L?1===a.L&&a.f("Realtime connection lost."):(a.f("Realtime connection failed."),"s-"===a.M.bb.substr(0,2)&&(Xb.remove("host:"+a.M.host),a.M.bb=a.M.host)),a.close()):b===a.D?(a.f("Secondary connection lost."),c=a.D,a.D=null,a.Xc!==c&&a.Rc!==c||a.close()):a.f("closing an old connection")}}
+function $e(a,b){return function(c){if(2!=a.L)if(b===a.Rc){var d=id("t",c);c=id("d",c);if("c"==d){if(d=id("t",c),"d"in c)if(c=c.d,"h"===d){var d=c.ts,e=c.v,f=c.h;a.xf=c.s;gc(a.M,f);0==a.L&&(a.I.start(),bf(a,a.I,d),"5"!==e&&O("Protocol version mismatch detected"),c=a.zf,(c=1<c.Wc.length?c.Wc[1]:null)&&cf(a,c))}else if("n"===d){a.f("recvd end transmission on primary");a.Rc=a.D;for(c=0;c<a.Ad.length;++c)a.wd(a.Ad[c]);a.Ad=[];df(a)}else"s"===d?(a.f("Connection shutdown command received. Shutting down..."),
+a.se&&(a.se(c),a.se=null),a.ja=null,a.close()):"r"===d?(a.f("Reset packet received.  New host: "+c),gc(a.M,c),1===a.L?a.close():(ef(a),Ze(a))):"e"===d?cd("Server Error: "+c):"o"===d?(a.f("got pong on primary."),ff(a),gf(a)):cd("Unknown control packet command: "+d)}else"d"==d&&a.wd(c)}else if(b===a.D)if(d=id("t",c),c=id("d",c),"c"==d)"t"in c&&(c=c.t,"a"===c?hf(a):"r"===c?(a.f("Got a reset on secondary, closing it"),a.D.close(),a.Xc!==a.D&&a.Rc!==a.D||a.close()):"o"===c&&(a.f("got pong on secondary."),
+a.wf--,hf(a)));else if("d"==d)a.Ad.push(c);else throw Error("Unknown protocol layer: "+d);else a.f("message on old connection")}}Ye.prototype.ua=function(a){jf(this,{t:"d",d:a})};function df(a){a.Xc===a.D&&a.Rc===a.D&&(a.f("cleaning up and promoting a connection: "+a.D.Zd),a.I=a.D,a.D=null)}
+function hf(a){0>=a.wf?(a.f("Secondary connection is healthy."),a.Cb=!0,a.D.sd(),a.D.start(),a.f("sending client ack on secondary"),a.D.send({t:"c",d:{t:"a",d:{}}}),a.f("Ending transmission on primary"),a.I.send({t:"c",d:{t:"n",d:{}}}),a.Xc=a.D,df(a)):(a.f("sending ping on secondary."),a.D.send({t:"c",d:{t:"p",d:{}}}))}Ye.prototype.wd=function(a){ff(this);this.te(a)};function ff(a){a.Cb||(a.xe--,0>=a.xe&&(a.f("Primary connection is healthy."),a.Cb=!0,a.I.sd()))}
+function cf(a,b){a.D=new b("c:"+a.id+":"+a.Ne++,a.M,a.xf);a.wf=b.responsesRequiredToBeHealthy||0;a.D.open($e(a,a.D),af(a,a.D));setTimeout(function(){a.D&&(a.f("Timed out trying to upgrade."),a.D.close())},Math.floor(6E4))}function bf(a,b,c){a.f("Realtime connection established.");a.I=b;a.L=1;a.Mc&&(a.Mc(c,a.xf),a.Mc=null);0===a.xe?(a.f("Primary connection is healthy."),a.Cb=!0):setTimeout(function(){gf(a)},Math.floor(5E3))}
+function gf(a){a.Cb||1!==a.L||(a.f("sending ping on primary."),jf(a,{t:"c",d:{t:"p",d:{}}}))}function jf(a,b){if(1!==a.L)throw"Connection is not connected";a.Xc.send(b)}Ye.prototype.close=function(){2!==this.L&&(this.f("Closing realtime connection."),this.L=2,ef(this),this.ja&&(this.ja(),this.ja=null))};function ef(a){a.f("Shutting down all connections");a.I&&(a.I.close(),a.I=null);a.D&&(a.D.close(),a.D=null);a.md&&(clearTimeout(a.md),a.md=null)};function L(a,b){if(1==arguments.length){this.o=a.split("/");for(var c=0,d=0;d<this.o.length;d++)0<this.o[d].length&&(this.o[c]=this.o[d],c++);this.o.length=c;this.Z=0}else this.o=a,this.Z=b}function T(a,b){var c=J(a);if(null===c)return b;if(c===J(b))return T(D(a),D(b));throw Error("INTERNAL ERROR: innerPath ("+b+") is not within outerPath ("+a+")");}
+function kf(a,b){for(var c=a.slice(),d=b.slice(),e=0;e<c.length&&e<d.length;e++){var f=Lc(c[e],d[e]);if(0!==f)return f}return c.length===d.length?0:c.length<d.length?-1:1}function J(a){return a.Z>=a.o.length?null:a.o[a.Z]}function Wd(a){return a.o.length-a.Z}function D(a){var b=a.Z;b<a.o.length&&b++;return new L(a.o,b)}function Xd(a){return a.Z<a.o.length?a.o[a.o.length-1]:null}g=L.prototype;
+g.toString=function(){for(var a="",b=this.Z;b<this.o.length;b++)""!==this.o[b]&&(a+="/"+this.o[b]);return a||"/"};g.slice=function(a){return this.o.slice(this.Z+(a||0))};g.parent=function(){if(this.Z>=this.o.length)return null;for(var a=[],b=this.Z;b<this.o.length-1;b++)a.push(this.o[b]);return new L(a,0)};
+g.m=function(a){for(var b=[],c=this.Z;c<this.o.length;c++)b.push(this.o[c]);if(a instanceof L)for(c=a.Z;c<a.o.length;c++)b.push(a.o[c]);else for(a=a.split("/"),c=0;c<a.length;c++)0<a[c].length&&b.push(a[c]);return new L(b,0)};g.e=function(){return this.Z>=this.o.length};g.ca=function(a){if(Wd(this)!==Wd(a))return!1;for(var b=this.Z,c=a.Z;b<=this.o.length;b++,c++)if(this.o[b]!==a.o[c])return!1;return!0};
+g.contains=function(a){var b=this.Z,c=a.Z;if(Wd(this)>Wd(a))return!1;for(;b<this.o.length;){if(this.o[b]!==a.o[c])return!1;++b;++c}return!0};var C=new L("");function lf(a,b){this.Ta=a.slice();this.Ka=Math.max(1,this.Ta.length);this.Se=b;for(var c=0;c<this.Ta.length;c++)this.Ka+=Nb(this.Ta[c]);mf(this)}lf.prototype.push=function(a){0<this.Ta.length&&(this.Ka+=1);this.Ta.push(a);this.Ka+=Nb(a);mf(this)};lf.prototype.pop=function(){var a=this.Ta.pop();this.Ka-=Nb(a);0<this.Ta.length&&--this.Ka};
+function mf(a){if(768<a.Ka)throw Error(a.Se+"has a key path longer than 768 bytes ("+a.Ka+").");if(32<a.Ta.length)throw Error(a.Se+"path specified exceeds the maximum depth that can be written (32) or object contains a cycle "+nf(a));}function nf(a){return 0==a.Ta.length?"":"in property '"+a.Ta.join(".")+"'"};function of(a){a instanceof pf||dd("Don't call new Database() directly - please use firebase.database().");this.ta=a;this.ba=new U(a,C);this.INTERNAL=new qf(this)}var rf={TIMESTAMP:{".sv":"timestamp"}};g=of.prototype;g.app=null;g.of=function(a){sf(this,"ref");y("database.ref",0,1,arguments.length);return p(a)?this.ba.m(a):this.ba};
+g.qg=function(a){sf(this,"database.refFromURL");y("database.refFromURL",1,1,arguments.length);var b=ed(a);tf("database.refFromURL",b);var c=b.kc;c.host!==this.ta.M.host&&dd("database.refFromURL: Host name does not match the current database: (found "+c.host+" but expected "+this.ta.M.host+")");return this.of(b.path.toString())};function sf(a,b){null===a.ta&&dd("Cannot call "+b+" on a deleted database.")}g.Zf=function(){y("database.goOffline",0,0,arguments.length);sf(this,"goOffline");this.ta.eb()};
+g.$f=function(){y("database.goOnline",0,0,arguments.length);sf(this,"goOnline");this.ta.lc()};Object.defineProperty(of.prototype,"app",{get:function(){return this.ta.app}});function qf(a){this.$a=a}qf.prototype.delete=function(){sf(this.$a,"delete");var a=uf.Wb(),b=this.$a.ta;x(a.nb,b.app.name)!==b&&dd("Database "+b.app.name+" has already been deleted.");b.eb();delete a.nb[b.app.name];this.$a.ta=null;this.$a.ba=null;this.$a=this.$a.INTERNAL=null;return Promise.resolve()};of.prototype.ref=of.prototype.of;
+of.prototype.refFromURL=of.prototype.qg;of.prototype.goOnline=of.prototype.$f;of.prototype.goOffline=of.prototype.Zf;qf.prototype["delete"]=qf.prototype.delete;function Qc(){this.k=this.B=null}Qc.prototype.find=function(a){if(null!=this.B)return this.B.Q(a);if(a.e()||null==this.k)return null;var b=J(a);a=D(a);return this.k.contains(b)?this.k.get(b).find(a):null};function Sc(a,b,c){if(b.e())a.B=c,a.k=null;else if(null!==a.B)a.B=a.B.F(b,c);else{null==a.k&&(a.k=new Ke);var d=J(b);a.k.contains(d)||a.k.add(d,new Qc);a=a.k.get(d);b=D(b);Sc(a,b,c)}}
+function vf(a,b){if(b.e())return a.B=null,a.k=null,!0;if(null!==a.B){if(a.B.J())return!1;var c=a.B;a.B=null;c.P(N,function(b,c){Sc(a,new L(b),c)});return vf(a,b)}return null!==a.k?(c=J(b),b=D(b),a.k.contains(c)&&vf(a.k.get(c),b)&&a.k.remove(c),a.k.e()?(a.k=null,!0):!1):!0}function Rc(a,b,c){null!==a.B?c(b,a.B):a.P(function(a,e){var f=new L(b.toString()+"/"+a);Rc(e,f,c)})}Qc.prototype.P=function(a){null!==this.k&&Le(this.k,function(b,c){a(b,c)})};var wf=/[\[\].#$\/\u0000-\u001F\u007F]/,xf=/[\[\].#$\u0000-\u001F\u007F]/;function yf(a){return q(a)&&0!==a.length&&!wf.test(a)}function zf(a){return null===a||q(a)||fa(a)&&!fd(a)||ha(a)&&Bb(a,".sv")}function Af(a,b,c,d){d&&!p(b)||Bf(Db(a,1,d),b,c)}
+function Bf(a,b,c){c instanceof L&&(c=new lf(c,a));if(!p(b))throw Error(a+"contains undefined "+nf(c));if(ga(b))throw Error(a+"contains a function "+nf(c)+" with contents: "+b.toString());if(fd(b))throw Error(a+"contains "+b.toString()+" "+nf(c));if(q(b)&&b.length>10485760/3&&10485760<Nb(b))throw Error(a+"contains a string greater than 10485760 utf8 bytes "+nf(c)+" ('"+b.substring(0,50)+"...')");if(ha(b)){var d=!1,e=!1;Cb(b,function(b,h){if(".value"===b)d=!0;else if(".priority"!==b&&".sv"!==b&&(e=
+!0,!yf(b)))throw Error(a+" contains an invalid key ("+b+") "+nf(c)+'.  Keys must be non-empty strings and can\'t contain ".", "#", "$", "/", "[", or "]"');c.push(b);Bf(a,h,c);c.pop()});if(d&&e)throw Error(a+' contains ".value" child '+nf(c)+" in addition to actual children.");}}
+function Cf(a,b){var c,d;for(c=0;c<b.length;c++){d=b[c];for(var e=d.slice(),f=0;f<e.length;f++)if((".priority"!==e[f]||f!==e.length-1)&&!yf(e[f]))throw Error(a+"contains an invalid key ("+e[f]+") in path "+d.toString()+'. Keys must be non-empty strings and can\'t contain ".", "#", "$", "/", "[", or "]"');}b.sort(kf);e=null;for(c=0;c<b.length;c++){d=b[c];if(null!==e&&e.contains(d))throw Error(a+"contains a path "+e.toString()+" that is ancestor of another path "+d.toString());e=d}}
+function Df(a,b,c){var d=Db(a,1,!1);if(!ha(b)||da(b))throw Error(d+" must be an object containing the children to replace.");var e=[];Cb(b,function(a,b){var k=new L(a);Bf(d,b,c.m(k));if(".priority"===Xd(k)&&!zf(b))throw Error(d+"contains an invalid value for '"+k.toString()+"', which must be a valid Firebase priority (a string, finite number, server value, or null).");e.push(k)});Cf(d,e)}
+function Ef(a,b,c){if(fd(c))throw Error(Db(a,b,!1)+"is "+c.toString()+", but must be a valid Firebase priority (a string, finite number, server value, or null).");if(!zf(c))throw Error(Db(a,b,!1)+"must be a valid Firebase priority (a string, finite number, server value, or null).");}
+function Ff(a,b,c){if(!c||p(b))switch(b){case "value":case "child_added":case "child_removed":case "child_changed":case "child_moved":break;default:throw Error(Db(a,1,c)+'must be a valid event type: "value", "child_added", "child_removed", "child_changed", or "child_moved".');}}function Gf(a,b){if(p(b)&&!yf(b))throw Error(Db(a,2,!0)+'was an invalid key: "'+b+'".  Firebase keys must be non-empty strings and can\'t contain ".", "#", "$", "/", "[", or "]").');}
+function Hf(a,b){if(!q(b)||0===b.length||xf.test(b))throw Error(Db(a,1,!1)+'was an invalid path: "'+b+'". Paths must be non-empty strings and can\'t contain ".", "#", "$", "[", or "]"');}function If(a,b){if(".info"===J(b))throw Error(a+" failed: Can't modify data under /.info/");}
+function tf(a,b){var c=b.path.toString(),d;!(d=!q(b.kc.host)||0===b.kc.host.length||!yf(b.kc.pe))&&(d=0!==c.length)&&(c&&(c=c.replace(/^\/*\.info(\/|$)/,"/")),d=!(q(c)&&0!==c.length&&!xf.test(c)));if(d)throw Error(Db(a,1,!1)+'must be a valid firebase URL and the path can\'t contain ".", "#", "$", "[", or "]".');};function V(a,b){this.ta=a;this.qa=b}V.prototype.cancel=function(a){y("Firebase.onDisconnect().cancel",0,1,arguments.length);A("Firebase.onDisconnect().cancel",1,a,!0);var b=new Hb;this.ta.xd(this.qa,Ib(b,a));return b.ra};V.prototype.cancel=V.prototype.cancel;V.prototype.remove=function(a){y("Firebase.onDisconnect().remove",0,1,arguments.length);If("Firebase.onDisconnect().remove",this.qa);A("Firebase.onDisconnect().remove",1,a,!0);var b=new Hb;Jf(this.ta,this.qa,null,Ib(b,a));return b.ra};
+V.prototype.remove=V.prototype.remove;V.prototype.set=function(a,b){y("Firebase.onDisconnect().set",1,2,arguments.length);If("Firebase.onDisconnect().set",this.qa);Af("Firebase.onDisconnect().set",a,this.qa,!1);A("Firebase.onDisconnect().set",2,b,!0);var c=new Hb;Jf(this.ta,this.qa,a,Ib(c,b));return c.ra};V.prototype.set=V.prototype.set;
+V.prototype.Kb=function(a,b,c){y("Firebase.onDisconnect().setWithPriority",2,3,arguments.length);If("Firebase.onDisconnect().setWithPriority",this.qa);Af("Firebase.onDisconnect().setWithPriority",a,this.qa,!1);Ef("Firebase.onDisconnect().setWithPriority",2,b);A("Firebase.onDisconnect().setWithPriority",3,c,!0);var d=new Hb;Kf(this.ta,this.qa,a,b,Ib(d,c));return d.ra};V.prototype.setWithPriority=V.prototype.Kb;
+V.prototype.update=function(a,b){y("Firebase.onDisconnect().update",1,2,arguments.length);If("Firebase.onDisconnect().update",this.qa);if(da(a)){for(var c={},d=0;d<a.length;++d)c[""+d]=a[d];a=c;O("Passing an Array to Firebase.onDisconnect().update() is deprecated. Use set() if you want to overwrite the existing data, or an Object with integer keys if you really do want to only update some of the children.")}Df("Firebase.onDisconnect().update",a,this.qa);A("Firebase.onDisconnect().update",2,b,!0);
+c=new Hb;Lf(this.ta,this.qa,a,Ib(c,b));return c.ra};V.prototype.update=V.prototype.update;function Mf(a){H(da(a)&&0<a.length,"Requires a non-empty array");this.Jf=a;this.Ec={}}Mf.prototype.Ge=function(a,b){var c;c=this.Ec[a]||[];var d=c.length;if(0<d){for(var e=Array(d),f=0;f<d;f++)e[f]=c[f];c=e}else c=[];for(d=0;d<c.length;d++)c[d].Ke.apply(c[d].Pa,Array.prototype.slice.call(arguments,1))};Mf.prototype.hc=function(a,b,c){Nf(this,a);this.Ec[a]=this.Ec[a]||[];this.Ec[a].push({Ke:b,Pa:c});(a=this.Xe(a))&&b.apply(c,a)};
+Mf.prototype.Jc=function(a,b,c){Nf(this,a);a=this.Ec[a]||[];for(var d=0;d<a.length;d++)if(a[d].Ke===b&&(!c||c===a[d].Pa)){a.splice(d,1);break}};function Nf(a,b){H(Oa(a.Jf,function(a){return a===b}),"Unknown event: "+b)};function Of(){Mf.call(this,["online"]);this.ic=!0;if("undefined"!==typeof window&&"undefined"!==typeof window.addEventListener){var a=this;window.addEventListener("online",function(){a.ic||(a.ic=!0,a.Ge("online",!0))},!1);window.addEventListener("offline",function(){a.ic&&(a.ic=!1,a.Ge("online",!1))},!1)}}ka(Of,Mf);Of.prototype.Xe=function(a){H("online"===a,"Unknown event type: "+a);return[this.ic]};ba(Of);function Pf(){Mf.call(this,["visible"]);var a,b;"undefined"!==typeof document&&"undefined"!==typeof document.addEventListener&&("undefined"!==typeof document.hidden?(b="visibilitychange",a="hidden"):"undefined"!==typeof document.mozHidden?(b="mozvisibilitychange",a="mozHidden"):"undefined"!==typeof document.msHidden?(b="msvisibilitychange",a="msHidden"):"undefined"!==typeof document.webkitHidden&&(b="webkitvisibilitychange",a="webkitHidden"));this.Nb=!0;if(b){var c=this;document.addEventListener(b,
+function(){var b=!document[a];b!==c.Nb&&(c.Nb=b,c.Ge("visible",b))},!1)}}ka(Pf,Mf);Pf.prototype.Xe=function(a){H("visible"===a,"Unknown event type: "+a);return[this.Nb]};ba(Pf);var Qf=function(){var a=0,b=[];return function(c){var d=c===a;a=c;for(var e=Array(8),f=7;0<=f;f--)e[f]="-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz".charAt(c%64),c=Math.floor(c/64);H(0===c,"Cannot push at time == 0");c=e.join("");if(d){for(f=11;0<=f&&63===b[f];f--)b[f]=0;b[f]++}else for(f=0;12>f;f++)b[f]=Math.floor(64*Math.random());for(f=0;12>f;f++)c+="-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz".charAt(b[f]);H(20===c.length,"nextPushId: Length should be 20.");
+return c}}();function Rf(a,b){this.Oa=a;this.ba=b?b:Sf}g=Rf.prototype;g.Ra=function(a,b){return new Rf(this.Oa,this.ba.Ra(a,b,this.Oa).Y(null,null,!1,null,null))};g.remove=function(a){return new Rf(this.Oa,this.ba.remove(a,this.Oa).Y(null,null,!1,null,null))};g.get=function(a){for(var b,c=this.ba;!c.e();){b=this.Oa(a,c.key);if(0===b)return c.value;0>b?c=c.left:0<b&&(c=c.right)}return null};
+function Tf(a,b){for(var c,d=a.ba,e=null;!d.e();){c=a.Oa(b,d.key);if(0===c){if(d.left.e())return e?e.key:null;for(d=d.left;!d.right.e();)d=d.right;return d.key}0>c?d=d.left:0<c&&(e=d,d=d.right)}throw Error("Attempted to find predecessor key for a nonexistent key.  What gives?");}g.e=function(){return this.ba.e()};g.count=function(){return this.ba.count()};g.Hc=function(){return this.ba.Hc()};g.fc=function(){return this.ba.fc()};g.ia=function(a){return this.ba.ia(a)};
+g.Xb=function(a){return new Uf(this.ba,null,this.Oa,!1,a)};g.Yb=function(a,b){return new Uf(this.ba,a,this.Oa,!1,b)};g.$b=function(a,b){return new Uf(this.ba,a,this.Oa,!0,b)};g.Ze=function(a){return new Uf(this.ba,null,this.Oa,!0,a)};function Uf(a,b,c,d,e){this.Hd=e||null;this.le=d;this.Sa=[];for(e=1;!a.e();)if(e=b?c(a.key,b):1,d&&(e*=-1),0>e)a=this.le?a.left:a.right;else if(0===e){this.Sa.push(a);break}else this.Sa.push(a),a=this.le?a.right:a.left}
+function R(a){if(0===a.Sa.length)return null;var b=a.Sa.pop(),c;c=a.Hd?a.Hd(b.key,b.value):{key:b.key,value:b.value};if(a.le)for(b=b.left;!b.e();)a.Sa.push(b),b=b.right;else for(b=b.right;!b.e();)a.Sa.push(b),b=b.left;return c}function Vf(a){if(0===a.Sa.length)return null;var b;b=a.Sa;b=b[b.length-1];return a.Hd?a.Hd(b.key,b.value):{key:b.key,value:b.value}}function Wf(a,b,c,d,e){this.key=a;this.value=b;this.color=null!=c?c:!0;this.left=null!=d?d:Sf;this.right=null!=e?e:Sf}g=Wf.prototype;
+g.Y=function(a,b,c,d,e){return new Wf(null!=a?a:this.key,null!=b?b:this.value,null!=c?c:this.color,null!=d?d:this.left,null!=e?e:this.right)};g.count=function(){return this.left.count()+1+this.right.count()};g.e=function(){return!1};g.ia=function(a){return this.left.ia(a)||a(this.key,this.value)||this.right.ia(a)};function Xf(a){return a.left.e()?a:Xf(a.left)}g.Hc=function(){return Xf(this).key};g.fc=function(){return this.right.e()?this.key:this.right.fc()};
+g.Ra=function(a,b,c){var d,e;e=this;d=c(a,e.key);e=0>d?e.Y(null,null,null,e.left.Ra(a,b,c),null):0===d?e.Y(null,b,null,null,null):e.Y(null,null,null,null,e.right.Ra(a,b,c));return Yf(e)};function Zf(a){if(a.left.e())return Sf;a.left.fa()||a.left.left.fa()||(a=$f(a));a=a.Y(null,null,null,Zf(a.left),null);return Yf(a)}
+g.remove=function(a,b){var c,d;c=this;if(0>b(a,c.key))c.left.e()||c.left.fa()||c.left.left.fa()||(c=$f(c)),c=c.Y(null,null,null,c.left.remove(a,b),null);else{c.left.fa()&&(c=ag(c));c.right.e()||c.right.fa()||c.right.left.fa()||(c=bg(c),c.left.left.fa()&&(c=ag(c),c=bg(c)));if(0===b(a,c.key)){if(c.right.e())return Sf;d=Xf(c.right);c=c.Y(d.key,d.value,null,null,Zf(c.right))}c=c.Y(null,null,null,null,c.right.remove(a,b))}return Yf(c)};g.fa=function(){return this.color};
+function Yf(a){a.right.fa()&&!a.left.fa()&&(a=cg(a));a.left.fa()&&a.left.left.fa()&&(a=ag(a));a.left.fa()&&a.right.fa()&&(a=bg(a));return a}function $f(a){a=bg(a);a.right.left.fa()&&(a=a.Y(null,null,null,null,ag(a.right)),a=cg(a),a=bg(a));return a}function cg(a){return a.right.Y(null,null,a.color,a.Y(null,null,!0,null,a.right.left),null)}function ag(a){return a.left.Y(null,null,a.color,null,a.Y(null,null,!0,a.left.right,null))}
+function bg(a){return a.Y(null,null,!a.color,a.left.Y(null,null,!a.left.color,null,null),a.right.Y(null,null,!a.right.color,null,null))}function dg(){}g=dg.prototype;g.Y=function(){return this};g.Ra=function(a,b){return new Wf(a,b,null)};g.remove=function(){return this};g.count=function(){return 0};g.e=function(){return!0};g.ia=function(){return!1};g.Hc=function(){return null};g.fc=function(){return null};g.fa=function(){return!1};var Sf=new dg;function P(a,b,c){this.k=a;(this.aa=b)&&ne(this.aa);a.e()&&H(!this.aa||this.aa.e(),"An empty node cannot have a priority");this.zb=c;this.Eb=null}g=P.prototype;g.J=function(){return!1};g.C=function(){return this.aa||F};g.ga=function(a){return this.k.e()?this:new P(this.k,a,this.zb)};g.R=function(a){if(".priority"===a)return this.C();a=this.k.get(a);return null===a?F:a};g.Q=function(a){var b=J(a);return null===b?this:this.R(b).Q(D(a))};g.Fa=function(a){return null!==this.k.get(a)};
+g.U=function(a,b){H(b,"We should always be passing snapshot nodes");if(".priority"===a)return this.ga(b);var c=new K(a,b),d,e;b.e()?(d=this.k.remove(a),c=Ie(this.zb,c,this.k)):(d=this.k.Ra(a,b),c=Ge(this.zb,c,this.k));e=d.e()?F:this.aa;return new P(d,e,c)};g.F=function(a,b){var c=J(a);if(null===c)return b;H(".priority"!==J(a)||1===Wd(a),".priority must be the last token in a path");var d=this.R(c).F(D(a),b);return this.U(c,d)};g.e=function(){return this.k.e()};g.Fb=function(){return this.k.count()};
+var eg=/^(0|[1-9]\d*)$/;g=P.prototype;g.H=function(a){if(this.e())return null;var b={},c=0,d=0,e=!0;this.P(N,function(f,h){b[f]=h.H(a);c++;e&&eg.test(f)?d=Math.max(d,Number(f)):e=!1});if(!a&&e&&d<2*c){var f=[],h;for(h in b)f[h]=b[h];return f}a&&!this.C().e()&&(b[".priority"]=this.C().H());return b};g.hash=function(){if(null===this.Eb){var a="";this.C().e()||(a+="priority:"+pe(this.C().H())+":");this.P(N,function(b,c){var d=c.hash();""!==d&&(a+=":"+b+":"+d)});this.Eb=""===a?"":Yc(a)}return this.Eb};
+g.Ye=function(a,b,c){return(c=fg(this,c))?(a=Tf(c,new K(a,b)))?a.name:null:Tf(this.k,a)};function le(a,b){var c;c=(c=fg(a,b))?(c=c.Hc())&&c.name:a.k.Hc();return c?new K(c,a.k.get(c)):null}function me(a,b){var c;c=(c=fg(a,b))?(c=c.fc())&&c.name:a.k.fc();return c?new K(c,a.k.get(c)):null}g.P=function(a,b){var c=fg(this,a);return c?c.ia(function(a){return b(a.name,a.S)}):this.k.ia(b)};g.Xb=function(a){return this.Yb(a.Ic(),a)};
+g.Yb=function(a,b){var c=fg(this,b);if(c)return c.Yb(a,function(a){return a});for(var c=this.k.Yb(a.name,Nc),d=Vf(c);null!=d&&0>b.compare(d,a);)R(c),d=Vf(c);return c};g.Ze=function(a){return this.$b(a.Gc(),a)};g.$b=function(a,b){var c=fg(this,b);if(c)return c.$b(a,function(a){return a});for(var c=this.k.$b(a.name,Nc),d=Vf(c);null!=d&&0<b.compare(d,a);)R(c),d=Vf(c);return c};g.tc=function(a){return this.e()?a.e()?0:-1:a.J()||a.e()?1:a===ue?-1:0};
+g.ob=function(a){if(a===ae||ua(this.zb.dc,a.toString()))return this;var b=this.zb,c=this.k;H(a!==ae,"KeyIndex always exists and isn't meant to be added to the IndexMap.");for(var d=[],e=!1,c=c.Xb(Nc),f=R(c);f;)e=e||a.yc(f.S),d.push(f),f=R(c);d=e?He(d,ke(a)):re;e=a.toString();c=ya(b.dc);c[e]=a;a=ya(b.od);a[e]=d;return new P(this.k,this.aa,new Fe(a,c))};g.zc=function(a){return a===ae||ua(this.zb.dc,a.toString())};
+g.ca=function(a){if(a===this)return!0;if(a.J())return!1;if(this.C().ca(a.C())&&this.k.count()===a.k.count()){var b=this.Xb(N);a=a.Xb(N);for(var c=R(b),d=R(a);c&&d;){if(c.name!==d.name||!c.S.ca(d.S))return!1;c=R(b);d=R(a)}return null===c&&null===d}return!1};function fg(a,b){return b===ae?null:a.zb.get(b.toString())}g.toString=function(){return B(this.H(!0))};function M(a,b){if(null===a)return F;var c=null;"object"===typeof a&&".priority"in a?c=a[".priority"]:"undefined"!==typeof b&&(c=b);H(null===c||"string"===typeof c||"number"===typeof c||"object"===typeof c&&".sv"in c,"Invalid priority type found: "+typeof c);"object"===typeof a&&".value"in a&&null!==a[".value"]&&(a=a[".value"]);if("object"!==typeof a||".sv"in a)return new Uc(a,M(c));if(a instanceof Array){var d=F,e=a;t(e,function(a,b){if(Bb(e,b)&&"."!==b.substring(0,1)){var c=M(a);if(c.J()||!c.e())d=
+d.U(b,c)}});return d.ga(M(c))}var f=[],h=!1,k=a;Cb(k,function(a){if("string"!==typeof a||"."!==a.substring(0,1)){var b=M(k[a]);b.e()||(h=h||!b.C().e(),f.push(new K(a,b)))}});if(0==f.length)return F;var m=He(f,Kc,function(a){return a.name},Mc);if(h){var l=He(f,ke(N));return new P(m,M(c),new Fe({".priority":l},{".priority":N}))}return new P(m,M(c),Je)}var gg=Math.log(2);
+function hg(a){this.count=parseInt(Math.log(a+1)/gg,10);this.Qe=this.count-1;this.Kf=a+1&parseInt(Array(this.count+1).join("1"),2)}function ig(a){var b=!(a.Kf&1<<a.Qe);a.Qe--;return b}
+function He(a,b,c,d){function e(b,d){var f=d-b;if(0==f)return null;if(1==f){var l=a[b],u=c?c(l):l;return new Wf(u,l.S,!1,null,null)}var l=parseInt(f/2,10)+b,f=e(b,l),z=e(l+1,d),l=a[l],u=c?c(l):l;return new Wf(u,l.S,!1,f,z)}a.sort(b);var f=function(b){function d(b,h){var k=u-b,z=u;u-=b;var z=e(k+1,z),k=a[k],G=c?c(k):k,z=new Wf(G,k.S,h,null,z);f?f.left=z:l=z;f=z}for(var f=null,l=null,u=a.length,z=0;z<b.count;++z){var G=ig(b),sd=Math.pow(2,b.count-(z+1));G?d(sd,!1):(d(sd,!1),d(sd,!0))}return l}(new hg(a.length));
+return null!==f?new Rf(d||b,f):new Rf(d||b)}function pe(a){return"number"===typeof a?"number:"+md(a):"string:"+a}function ne(a){if(a.J()){var b=a.H();H("string"===typeof b||"number"===typeof b||"object"===typeof b&&Bb(b,".sv"),"Priority must be a string or number.")}else H(a===ue||a.e(),"priority of unexpected type.");H(a===ue||a.C().e(),"Priority nodes can't have a priority of their own.")}var F=new P(new Rf(Mc),null,Je);function jg(){P.call(this,new Rf(Mc),F,Je)}ka(jg,P);g=jg.prototype;
+g.tc=function(a){return a===this?0:1};g.ca=function(a){return a===this};g.C=function(){return this};g.R=function(){return F};g.e=function(){return!1};var ue=new jg,se=new K("[MIN_NAME]",F),ye=new K("[MAX_NAME]",ue);function W(a,b,c){this.A=a;this.W=b;this.g=c}W.prototype.H=function(){y("Firebase.DataSnapshot.val",0,0,arguments.length);return this.A.H()};W.prototype.val=W.prototype.H;W.prototype.Te=function(){y("Firebase.DataSnapshot.exportVal",0,0,arguments.length);return this.A.H(!0)};W.prototype.exportVal=W.prototype.Te;W.prototype.Uf=function(){y("Firebase.DataSnapshot.exists",0,0,arguments.length);return!this.A.e()};W.prototype.exists=W.prototype.Uf;
+W.prototype.m=function(a){y("Firebase.DataSnapshot.child",0,1,arguments.length);fa(a)&&(a=String(a));Hf("Firebase.DataSnapshot.child",a);var b=new L(a),c=this.W.m(b);return new W(this.A.Q(b),c,N)};W.prototype.child=W.prototype.m;W.prototype.Fa=function(a){y("Firebase.DataSnapshot.hasChild",1,1,arguments.length);Hf("Firebase.DataSnapshot.hasChild",a);var b=new L(a);return!this.A.Q(b).e()};W.prototype.hasChild=W.prototype.Fa;
+W.prototype.C=function(){y("Firebase.DataSnapshot.getPriority",0,0,arguments.length);return this.A.C().H()};W.prototype.getPriority=W.prototype.C;W.prototype.forEach=function(a){y("Firebase.DataSnapshot.forEach",1,1,arguments.length);A("Firebase.DataSnapshot.forEach",1,a,!1);if(this.A.J())return!1;var b=this;return!!this.A.P(this.g,function(c,d){return a(new W(d,b.W.m(c),N))})};W.prototype.forEach=W.prototype.forEach;
+W.prototype.kd=function(){y("Firebase.DataSnapshot.hasChildren",0,0,arguments.length);return this.A.J()?!1:!this.A.e()};W.prototype.hasChildren=W.prototype.kd;W.prototype.getKey=function(){y("Firebase.DataSnapshot.key",0,0,arguments.length);return this.W.getKey()};od(W.prototype,"key",W.prototype.getKey);W.prototype.Fb=function(){y("Firebase.DataSnapshot.numChildren",0,0,arguments.length);return this.A.Fb()};W.prototype.numChildren=W.prototype.Fb;
+W.prototype.xb=function(){y("Firebase.DataSnapshot.ref",0,0,arguments.length);return this.W};od(W.prototype,"ref",W.prototype.xb);function Ud(a,b){this.O=a;this.Ld=b}function Rd(a,b,c,d){return new Ud(new Dc(b,c,d),a.Ld)}function Vd(a){return a.O.ea?a.O.j():null}Ud.prototype.u=function(){return this.Ld};function Ec(a){return a.Ld.ea?a.Ld.j():null};function kg(a,b){this.W=a;var c=a.n,d=new be(c.g),c=S(c)?new be(c.g):c.xa?new he(c):new ce(c);this.nf=new Ld(c);var e=b.u(),f=b.O,h=d.za(F,e.j(),null),k=c.za(F,f.j(),null);this.Na=new Ud(new Dc(k,f.ea,c.Qa()),new Dc(h,e.ea,d.Qa()));this.ab=[];this.Rf=new Gd(a)}function lg(a){return a.W}g=kg.prototype;g.u=function(){return this.Na.u().j()};g.jb=function(a){var b=Ec(this.Na);return b&&(S(this.W.n)||!a.e()&&!b.R(J(a)).e())?b.Q(a):null};g.e=function(){return 0===this.ab.length};g.Ob=function(a){this.ab.push(a)};
+g.mb=function(a,b){var c=[];if(b){H(null==a,"A cancel should cancel all event registrations.");var d=this.W.path;Ja(this.ab,function(a){(a=a.Oe(b,d))&&c.push(a)})}if(a){for(var e=[],f=0;f<this.ab.length;++f){var h=this.ab[f];if(!h.matches(a))e.push(h);else if(a.$e()){e=e.concat(this.ab.slice(f+1));break}}this.ab=e}else this.ab=[];return c};
+g.gb=function(a,b,c){a.type===Dd&&null!==a.source.Ib&&(H(Ec(this.Na),"We should always have a full cache before handling merges"),H(Vd(this.Na),"Missing event cache, even though we have a server cache"));var d=this.Na;a=this.nf.gb(d,a,b,c);b=this.nf;c=a.Sd;H(c.O.j().zc(b.V.g),"Event snap not indexed");H(c.u().j().zc(b.V.g),"Server snap not indexed");H(Hc(a.Sd.u())||!Hc(d.u()),"Once a server snap is complete, it should never go back");this.Na=a.Sd;return mg(this,a.Lf,a.Sd.O.j(),null)};
+function ng(a,b){var c=a.Na.O,d=[];c.j().J()||c.j().P(N,function(a,b){d.push(new I("child_added",b,a))});c.ea&&d.push(Fc(c.j()));return mg(a,d,c.j(),b)}function mg(a,b,c,d){return Hd(a.Rf,b,c,d?[d]:a.ab)};function og(a,b,c){this.Qb=a;this.sb=b;this.ub=c||null}g=og.prototype;g.sf=function(a){return"value"===a};g.createEvent=function(a,b){var c=b.n.g;return new xc("value",this,new W(a.Ma,b.xb(),c))};g.Ub=function(a){var b=this.ub;if("cancel"===a.ge()){H(this.sb,"Raising a cancel event on a listener with no cancel callback");var c=this.sb;return function(){c.call(b,a.error)}}var d=this.Qb;return function(){d.call(b,a.Md)}};g.Oe=function(a,b){return this.sb?new yc(this,a,b):null};
+g.matches=function(a){return a instanceof og?a.Qb&&this.Qb?a.Qb===this.Qb&&a.ub===this.ub:!0:!1};g.$e=function(){return null!==this.Qb};function pg(a,b,c){this.ha=a;this.sb=b;this.ub=c}g=pg.prototype;g.sf=function(a){a="children_added"===a?"child_added":a;return("children_removed"===a?"child_removed":a)in this.ha};g.Oe=function(a,b){return this.sb?new yc(this,a,b):null};
+g.createEvent=function(a,b){H(null!=a.Za,"Child events should have a childName.");var c=b.xb().m(a.Za);return new xc(a.type,this,new W(a.Ma,c,b.n.g),a.Dd)};g.Ub=function(a){var b=this.ub;if("cancel"===a.ge()){H(this.sb,"Raising a cancel event on a listener with no cancel callback");var c=this.sb;return function(){c.call(b,a.error)}}var d=this.ha[a.gd];return function(){d.call(b,a.Md,a.Dd)}};
+g.matches=function(a){if(a instanceof pg){if(!this.ha||!a.ha)return!0;if(this.ub===a.ub){var b=qa(a.ha);if(b===qa(this.ha)){if(1===b){var b=ra(a.ha),c=ra(this.ha);return c===b&&(!a.ha[b]||!this.ha[c]||a.ha[b]===this.ha[c])}return pa(this.ha,function(b,c){return a.ha[c]===b})}}}return!1};g.$e=function(){return null!==this.ha};function X(a,b,c,d){this.w=a;this.path=b;this.n=c;this.Oc=d}
+function qg(a){var b=null,c=null;a.ka&&(b=ee(a));a.na&&(c=ge(a));if(a.g===ae){if(a.ka){if("[MIN_NAME]"!=de(a))throw Error("Query: When ordering by key, you may only pass one argument to startAt(), endAt(), or equalTo().");if("string"!==typeof b)throw Error("Query: When ordering by key, the argument passed to startAt(), endAt(),or equalTo() must be a string.");}if(a.na){if("[MAX_NAME]"!=fe(a))throw Error("Query: When ordering by key, you may only pass one argument to startAt(), endAt(), or equalTo().");if("string"!==
+typeof c)throw Error("Query: When ordering by key, the argument passed to startAt(), endAt(),or equalTo() must be a string.");}}else if(a.g===N){if(null!=b&&!zf(b)||null!=c&&!zf(c))throw Error("Query: When ordering by priority, the first argument passed to startAt(), endAt(), or equalTo() must be a valid priority value (null, a number, or a string).");}else if(H(a.g instanceof te||a.g===ze,"unknown index type."),null!=b&&"object"===typeof b||null!=c&&"object"===typeof c)throw Error("Query: First argument passed to startAt(), endAt(), or equalTo() cannot be an object.");
+}function rg(a){if(a.ka&&a.na&&a.xa&&(!a.xa||""===a.oc))throw Error("Query: Can't combine startAt(), endAt(), and limit(). Use limitToFirst() or limitToLast() instead.");}function sg(a,b){if(!0===a.Oc)throw Error(b+": You can't combine multiple orderBy calls.");}g=X.prototype;g.xb=function(){y("Query.ref",0,0,arguments.length);return new U(this.w,this.path)};
+g.hc=function(a,b,c,d){y("Query.on",2,4,arguments.length);Ff("Query.on",a,!1);A("Query.on",2,b,!1);var e=tg("Query.on",c,d);if("value"===a)ug(this.w,this,new og(b,e.cancel||null,e.Pa||null));else{var f={};f[a]=b;ug(this.w,this,new pg(f,e.cancel,e.Pa))}return b};
+g.Jc=function(a,b,c){y("Query.off",0,3,arguments.length);Ff("Query.off",a,!0);A("Query.off",2,b,!0);Eb("Query.off",3,c);var d=null,e=null;"value"===a?d=new og(b||null,null,c||null):a&&(b&&(e={},e[a]=b),d=new pg(e,null,c||null));e=this.w;d=".info"===J(this.path)?e.pd.mb(this,d):e.K.mb(this,d);tc(e.da,this.path,d)};
+g.jg=function(a,b){function c(k){f&&(f=!1,e.Jc(a,c),b&&b.call(d.Pa,k),h.resolve(k))}y("Query.once",1,4,arguments.length);Ff("Query.once",a,!1);A("Query.once",2,b,!0);var d=tg("Query.once",arguments[2],arguments[3]),e=this,f=!0,h=new Hb;Jb(h.ra);this.hc(a,c,function(b){e.Jc(a,c);d.cancel&&d.cancel.call(d.Pa,b);h.reject(b)});return h.ra};
+g.ne=function(a){y("Query.limitToFirst",1,1,arguments.length);if(!fa(a)||Math.floor(a)!==a||0>=a)throw Error("Query.limitToFirst: First argument must be a positive integer.");if(this.n.xa)throw Error("Query.limitToFirst: Limit was already set (by another call to limit, limitToFirst, or limitToLast).");return new X(this.w,this.path,this.n.ne(a),this.Oc)};
+g.oe=function(a){y("Query.limitToLast",1,1,arguments.length);if(!fa(a)||Math.floor(a)!==a||0>=a)throw Error("Query.limitToLast: First argument must be a positive integer.");if(this.n.xa)throw Error("Query.limitToLast: Limit was already set (by another call to limit, limitToFirst, or limitToLast).");return new X(this.w,this.path,this.n.oe(a),this.Oc)};
+g.kg=function(a){y("Query.orderByChild",1,1,arguments.length);if("$key"===a)throw Error('Query.orderByChild: "$key" is invalid.  Use Query.orderByKey() instead.');if("$priority"===a)throw Error('Query.orderByChild: "$priority" is invalid.  Use Query.orderByPriority() instead.');if("$value"===a)throw Error('Query.orderByChild: "$value" is invalid.  Use Query.orderByValue() instead.');Hf("Query.orderByChild",a);sg(this,"Query.orderByChild");var b=new L(a);if(b.e())throw Error("Query.orderByChild: cannot pass in empty path.  Use Query.orderByValue() instead.");
+b=new te(b);b=De(this.n,b);qg(b);return new X(this.w,this.path,b,!0)};g.lg=function(){y("Query.orderByKey",0,0,arguments.length);sg(this,"Query.orderByKey");var a=De(this.n,ae);qg(a);return new X(this.w,this.path,a,!0)};g.mg=function(){y("Query.orderByPriority",0,0,arguments.length);sg(this,"Query.orderByPriority");var a=De(this.n,N);qg(a);return new X(this.w,this.path,a,!0)};
+g.ng=function(){y("Query.orderByValue",0,0,arguments.length);sg(this,"Query.orderByValue");var a=De(this.n,ze);qg(a);return new X(this.w,this.path,a,!0)};g.Nd=function(a,b){y("Query.startAt",0,2,arguments.length);Af("Query.startAt",a,this.path,!0);Gf("Query.startAt",b);var c=this.n.Nd(a,b);rg(c);qg(c);if(this.n.ka)throw Error("Query.startAt: Starting point was already set (by another call to startAt or equalTo).");p(a)||(b=a=null);return new X(this.w,this.path,c,this.Oc)};
+g.fd=function(a,b){y("Query.endAt",0,2,arguments.length);Af("Query.endAt",a,this.path,!0);Gf("Query.endAt",b);var c=this.n.fd(a,b);rg(c);qg(c);if(this.n.na)throw Error("Query.endAt: Ending point was already set (by another call to endAt or equalTo).");return new X(this.w,this.path,c,this.Oc)};
+g.Qf=function(a,b){y("Query.equalTo",1,2,arguments.length);Af("Query.equalTo",a,this.path,!1);Gf("Query.equalTo",b);if(this.n.ka)throw Error("Query.equalTo: Starting point was already set (by another call to endAt or equalTo).");if(this.n.na)throw Error("Query.equalTo: Ending point was already set (by another call to endAt or equalTo).");return this.Nd(a,b).fd(a,b)};
+g.toString=function(){y("Query.toString",0,0,arguments.length);for(var a=this.path,b="",c=a.Z;c<a.o.length;c++)""!==a.o[c]&&(b+="/"+encodeURIComponent(String(a.o[c])));return this.w.toString()+(b||"/")};g.ya=function(){var a=jd(Ee(this.n));return"{}"===a?"default":a};
+function tg(a,b,c){var d={cancel:null,Pa:null};if(b&&c)d.cancel=b,A(a,3,d.cancel,!0),d.Pa=c,Eb(a,4,d.Pa);else if(b)if("object"===typeof b&&null!==b)d.Pa=b;else if("function"===typeof b)d.cancel=b;else throw Error(Db(a,3,!0)+" must either be a cancel callback or a context object.");return d}X.prototype.on=X.prototype.hc;X.prototype.off=X.prototype.Jc;X.prototype.once=X.prototype.jg;X.prototype.limitToFirst=X.prototype.ne;X.prototype.limitToLast=X.prototype.oe;X.prototype.orderByChild=X.prototype.kg;
+X.prototype.orderByKey=X.prototype.lg;X.prototype.orderByPriority=X.prototype.mg;X.prototype.orderByValue=X.prototype.ng;X.prototype.startAt=X.prototype.Nd;X.prototype.endAt=X.prototype.fd;X.prototype.equalTo=X.prototype.Qf;X.prototype.toString=X.prototype.toString;od(X.prototype,"ref",X.prototype.xb);function vg(a,b){this.value=a;this.children=b||wg}var wg=new Rf(function(a,b){return a===b?0:a<b?-1:1});function xg(a){var b=Q;t(a,function(a,d){b=b.set(new L(d),a)});return b}g=vg.prototype;g.e=function(){return null===this.value&&this.children.e()};function yg(a,b,c){if(null!=a.value&&c(a.value))return{path:C,value:a.value};if(b.e())return null;var d=J(b);a=a.children.get(d);return null!==a?(b=yg(a,D(b),c),null!=b?{path:(new L(d)).m(b.path),value:b.value}:null):null}
+function zg(a,b){return yg(a,b,function(){return!0})}g.subtree=function(a){if(a.e())return this;var b=this.children.get(J(a));return null!==b?b.subtree(D(a)):Q};g.set=function(a,b){if(a.e())return new vg(b,this.children);var c=J(a),d=(this.children.get(c)||Q).set(D(a),b),c=this.children.Ra(c,d);return new vg(this.value,c)};
+g.remove=function(a){if(a.e())return this.children.e()?Q:new vg(null,this.children);var b=J(a),c=this.children.get(b);return c?(a=c.remove(D(a)),b=a.e()?this.children.remove(b):this.children.Ra(b,a),null===this.value&&b.e()?Q:new vg(this.value,b)):this};g.get=function(a){if(a.e())return this.value;var b=this.children.get(J(a));return b?b.get(D(a)):null};
+function $d(a,b,c){if(b.e())return c;var d=J(b);b=$d(a.children.get(d)||Q,D(b),c);d=b.e()?a.children.remove(d):a.children.Ra(d,b);return new vg(a.value,d)}function Ag(a,b){return Bg(a,C,b)}function Bg(a,b,c){var d={};a.children.ia(function(a,f){d[a]=Bg(f,b.m(a),c)});return c(b,a.value,d)}function Cg(a,b,c){return Dg(a,b,C,c)}function Dg(a,b,c,d){var e=a.value?d(c,a.value):!1;if(e)return e;if(b.e())return null;e=J(b);return(a=a.children.get(e))?Dg(a,D(b),c.m(e),d):null}
+function Eg(a,b,c){Fg(a,b,C,c)}function Fg(a,b,c,d){if(b.e())return a;a.value&&d(c,a.value);var e=J(b);return(a=a.children.get(e))?Fg(a,D(b),c.m(e),d):Q}function Yd(a,b){Gg(a,C,b)}function Gg(a,b,c){a.children.ia(function(a,e){Gg(e,b.m(a),c)});a.value&&c(b,a.value)}function Hg(a,b){a.children.ia(function(a,d){d.value&&b(a,d.value)})}var Q=new vg(null);vg.prototype.toString=function(){var a={};Yd(this,function(b,c){a[b.toString()]=c.toString()});return B(a)};function Ig(a,b,c){this.type=Qd;this.source=Jg;this.path=a;this.Pb=b;this.Id=c}Ig.prototype.Nc=function(a){if(this.path.e()){if(null!=this.Pb.value)return H(this.Pb.children.e(),"affectedTree should not have overlapping affected paths."),this;a=this.Pb.subtree(new L(a));return new Ig(C,a,this.Id)}H(J(this.path)===a,"operationForChild called for unrelated child.");return new Ig(D(this.path),this.Pb,this.Id)};
+Ig.prototype.toString=function(){return"Operation("+this.path+": "+this.source.toString()+" ack write revert="+this.Id+" affectedTree="+this.Pb+")"};var $b=0,Dd=1,Qd=2,bc=3;function Kg(a,b,c,d){this.ee=a;this.Ve=b;this.Ib=c;this.Ee=d;H(!d||b,"Tagged queries must be from server.")}var Jg=new Kg(!0,!1,null,!1),Lg=new Kg(!1,!0,null,!1);Kg.prototype.toString=function(){return this.ee?"user":this.Ee?"server(queryID="+this.Ib+")":"server"};function Mg(a){this.X=a}var Ng=new Mg(new vg(null));function Og(a,b,c){if(b.e())return new Mg(new vg(c));var d=zg(a.X,b);if(null!=d){var e=d.path,d=d.value;b=T(e,b);d=d.F(b,c);return new Mg(a.X.set(e,d))}a=$d(a.X,b,new vg(c));return new Mg(a)}function Pg(a,b,c){var d=a;Cb(c,function(a,c){d=Og(d,b.m(a),c)});return d}Mg.prototype.Ed=function(a){if(a.e())return Ng;a=$d(this.X,a,Q);return new Mg(a)};function Qg(a,b){var c=zg(a.X,b);return null!=c?a.X.get(c.path).Q(T(c.path,b)):null}
+function Rg(a){var b=[],c=a.X.value;null!=c?c.J()||c.P(N,function(a,c){b.push(new K(a,c))}):a.X.children.ia(function(a,c){null!=c.value&&b.push(new K(a,c.value))});return b}function Sg(a,b){if(b.e())return a;var c=Qg(a,b);return null!=c?new Mg(new vg(c)):new Mg(a.X.subtree(b))}Mg.prototype.e=function(){return this.X.e()};Mg.prototype.apply=function(a){return Tg(C,this.X,a)};
+function Tg(a,b,c){if(null!=b.value)return c.F(a,b.value);var d=null;b.children.ia(function(b,f){".priority"===b?(H(null!==f.value,"Priority writes must always be leaf nodes"),d=f.value):c=Tg(a.m(b),f,c)});c.Q(a).e()||null===d||(c=c.F(a.m(".priority"),d));return c};function Ug(){this.Aa={}}g=Ug.prototype;g.e=function(){return xa(this.Aa)};g.gb=function(a,b,c){var d=a.source.Ib;if(null!==d)return d=x(this.Aa,d),H(null!=d,"SyncTree gave us an op for an invalid query."),d.gb(a,b,c);var e=[];t(this.Aa,function(d){e=e.concat(d.gb(a,b,c))});return e};g.Ob=function(a,b,c,d,e){var f=a.ya(),h=x(this.Aa,f);if(!h){var h=c.Ba(e?d:null),k=!1;h?k=!0:(h=d instanceof P?c.sc(d):F,k=!1);h=new kg(a,new Ud(new Dc(h,k,!1),new Dc(d,e,!1)));this.Aa[f]=h}h.Ob(b);return ng(h,b)};
+g.mb=function(a,b,c){var d=a.ya(),e=[],f=[],h=null!=Vg(this);if("default"===d){var k=this;t(this.Aa,function(a,d){f=f.concat(a.mb(b,c));a.e()&&(delete k.Aa[d],S(a.W.n)||e.push(a.W))})}else{var m=x(this.Aa,d);m&&(f=f.concat(m.mb(b,c)),m.e()&&(delete this.Aa[d],S(m.W.n)||e.push(m.W)))}h&&null==Vg(this)&&e.push(new U(a.w,a.path));return{rg:e,Sf:f}};function Wg(a){return Ka(sa(a.Aa),function(a){return!S(a.W.n)})}g.jb=function(a){var b=null;t(this.Aa,function(c){b=b||c.jb(a)});return b};
+function Xg(a,b){if(S(b.n))return Vg(a);var c=b.ya();return x(a.Aa,c)}function Vg(a){return wa(a.Aa,function(a){return S(a.W.n)})||null};function Yg(){this.T=Ng;this.la=[];this.Cc=-1}function Zg(a,b){for(var c=0;c<a.la.length;c++){var d=a.la[c];if(d.Zc===b)return d}return null}g=Yg.prototype;
+g.Ed=function(a){var b=Pa(this.la,function(b){return b.Zc===a});H(0<=b,"removeWrite called with nonexistent writeId.");var c=this.la[b];this.la.splice(b,1);for(var d=c.visible,e=!1,f=this.la.length-1;d&&0<=f;){var h=this.la[f];h.visible&&(f>=b&&$g(h,c.path)?d=!1:c.path.contains(h.path)&&(e=!0));f--}if(d){if(e)this.T=ah(this.la,bh,C),this.Cc=0<this.la.length?this.la[this.la.length-1].Zc:-1;else if(c.Ja)this.T=this.T.Ed(c.path);else{var k=this;t(c.children,function(a,b){k.T=k.T.Ed(c.path.m(b))})}return!0}return!1};
+g.Ba=function(a,b,c,d){if(c||d){var e=Sg(this.T,a);return!d&&e.e()?b:d||null!=b||null!=Qg(e,C)?(e=ah(this.la,function(b){return(b.visible||d)&&(!c||!(0<=Ia(c,b.Zc)))&&(b.path.contains(a)||a.contains(b.path))},a),b=b||F,e.apply(b)):null}e=Qg(this.T,a);if(null!=e)return e;e=Sg(this.T,a);return e.e()?b:null!=b||null!=Qg(e,C)?(b=b||F,e.apply(b)):null};
+g.sc=function(a,b){var c=F,d=Qg(this.T,a);if(d)d.J()||d.P(N,function(a,b){c=c.U(a,b)});else if(b){var e=Sg(this.T,a);b.P(N,function(a,b){var d=Sg(e,new L(a)).apply(b);c=c.U(a,d)});Ja(Rg(e),function(a){c=c.U(a.name,a.S)})}else e=Sg(this.T,a),Ja(Rg(e),function(a){c=c.U(a.name,a.S)});return c};g.$c=function(a,b,c,d){H(c||d,"Either existingEventSnap or existingServerSnap must exist");a=a.m(b);if(null!=Qg(this.T,a))return null;a=Sg(this.T,a);return a.e()?d.Q(b):a.apply(d.Q(b))};
+g.rc=function(a,b,c){a=a.m(b);var d=Qg(this.T,a);return null!=d?d:Cc(c,b)?Sg(this.T,a).apply(c.j().R(b)):null};g.mc=function(a){return Qg(this.T,a)};g.Xd=function(a,b,c,d,e,f){var h;a=Sg(this.T,a);h=Qg(a,C);if(null==h)if(null!=b)h=a.apply(b);else return[];h=h.ob(f);if(h.e()||h.J())return[];b=[];a=ke(f);e=e?h.$b(c,f):h.Yb(c,f);for(f=R(e);f&&b.length<d;)0!==a(f,c)&&b.push(f),f=R(e);return b};
+function $g(a,b){return a.Ja?a.path.contains(b):!!va(a.children,function(c,d){return a.path.m(d).contains(b)})}function bh(a){return a.visible}
+function ah(a,b,c){for(var d=Ng,e=0;e<a.length;++e){var f=a[e];if(b(f)){var h=f.path;if(f.Ja)c.contains(h)?(h=T(c,h),d=Og(d,h,f.Ja)):h.contains(c)&&(h=T(h,c),d=Og(d,C,f.Ja.Q(h)));else if(f.children)if(c.contains(h))h=T(c,h),d=Pg(d,h,f.children);else{if(h.contains(c))if(h=T(h,c),h.e())d=Pg(d,C,f.children);else if(f=x(f.children,J(h)))f=f.Q(D(h)),d=Og(d,C,f)}else throw Wc("WriteRecord should have .snap or .children");}}return d}function ch(a,b){this.Mb=a;this.X=b}g=ch.prototype;
+g.Ba=function(a,b,c){return this.X.Ba(this.Mb,a,b,c)};g.sc=function(a){return this.X.sc(this.Mb,a)};g.$c=function(a,b,c){return this.X.$c(this.Mb,a,b,c)};g.mc=function(a){return this.X.mc(this.Mb.m(a))};g.Xd=function(a,b,c,d,e){return this.X.Xd(this.Mb,a,b,c,d,e)};g.rc=function(a,b){return this.X.rc(this.Mb,a,b)};g.m=function(a){return new ch(this.Mb.m(a),this.X)};function dh(){this.children={};this.ad=0;this.value=null}function eh(a,b,c){this.ud=a?a:"";this.Ha=b?b:null;this.A=c?c:new dh}function fh(a,b){for(var c=b instanceof L?b:new L(b),d=a,e;null!==(e=J(c));)d=new eh(e,d,x(d.A.children,e)||new dh),c=D(c);return d}g=eh.prototype;g.Ea=function(){return this.A.value};function gh(a,b){H("undefined"!==typeof b,"Cannot set value to undefined");a.A.value=b;hh(a)}g.clear=function(){this.A.value=null;this.A.children={};this.A.ad=0;hh(this)};
+g.kd=function(){return 0<this.A.ad};g.e=function(){return null===this.Ea()&&!this.kd()};g.P=function(a){var b=this;t(this.A.children,function(c,d){a(new eh(d,b,c))})};function ih(a,b,c,d){c&&!d&&b(a);a.P(function(a){ih(a,b,!0,d)});c&&d&&b(a)}function jh(a,b){for(var c=a.parent();null!==c&&!b(c);)c=c.parent()}g.path=function(){return new L(null===this.Ha?this.ud:this.Ha.path()+"/"+this.ud)};g.name=function(){return this.ud};g.parent=function(){return this.Ha};
+function hh(a){if(null!==a.Ha){var b=a.Ha,c=a.ud,d=a.e(),e=Bb(b.A.children,c);d&&e?(delete b.A.children[c],b.A.ad--,hh(b)):d||e||(b.A.children[c]=a.A,b.A.ad++,hh(b))}};function kh(a,b,c,d,e,f){this.id=lh++;this.f=bd("p:"+this.id+":");this.qd={};this.$={};this.pa=[];this.Pc=0;this.Lc=[];this.ma=!1;this.Va=1E3;this.td=3E5;this.Hb=b;this.Kc=c;this.ue=d;this.M=a;this.pb=this.Ia=this.Db=this.ze=null;this.Vd=e;this.de=!1;this.ke=0;if(f)throw Error("Auth override specified in options, but not supported on non Node.js platforms");this.Je=f||null;this.vb=null;this.Nb=!1;this.Gd={};this.sg=0;this.Ue=!0;this.Bc=this.me=null;mh(this,0);Pf.Wb().hc("visible",this.ig,this);-1===
+a.host.indexOf("fblocal")&&Of.Wb().hc("online",this.hg,this)}var lh=0,nh=0;g=kh.prototype;g.ua=function(a,b,c){var d=++this.sg;a={r:d,a:a,b:b};this.f(B(a));H(this.ma,"sendRequest call when we're not connected not allowed.");this.Ia.ua(a);c&&(this.Gd[d]=c)};
+g.cf=function(a,b,c,d){var e=a.ya(),f=a.path.toString();this.f("Listen called for "+f+" "+e);this.$[f]=this.$[f]||{};H(zd(a.n)||!S(a.n),"listen() called for non-default but complete query");H(!this.$[f][e],"listen() called twice for same path/queryId.");a={G:d,ld:b,og:a,tag:c};this.$[f][e]=a;this.ma&&oh(this,a)};
+function oh(a,b){var c=b.og,d=c.path.toString(),e=c.ya();a.f("Listen on "+d+" for "+e);var f={p:d};b.tag&&(f.q=Ee(c.n),f.t=b.tag);f.h=b.ld();a.ua("q",f,function(f){var k=f.d,m=f.s;if(k&&"object"===typeof k&&Bb(k,"w")){var l=x(k,"w");da(l)&&0<=Ia(l,"no_index")&&O("Using an unspecified index. Consider adding "+('".indexOn": "'+c.n.g.toString()+'"')+" at "+c.path.toString()+" to your security rules for better performance")}(a.$[d]&&a.$[d][e])===b&&(a.f("listen response",f),"ok"!==m&&ph(a,d,e),b.G&&b.G(m,
+k))})}g.pf=function(a){this.pb=a;this.f("Auth token refreshed");this.pb?qh(this):this.ma&&this.ua("unauth",{},function(){});if(a&&40===a.length||pd(a))this.f("Admin auth credential detected.  Reducing max reconnect time."),this.td=3E4};function qh(a){if(a.ma&&a.pb){var b=a.pb,c={cred:b};a.Je&&(c.authvar=a.Je);a.ua("auth",c,function(c){var e=c.s;c=c.d||"error";a.pb===b&&("ok"===e?this.ke=0:rh(a,e,c))})}}
+g.Df=function(a,b){var c=a.path.toString(),d=a.ya();this.f("Unlisten called for "+c+" "+d);H(zd(a.n)||!S(a.n),"unlisten() called for non-default but complete query");if(ph(this,c,d)&&this.ma){var e=Ee(a.n);this.f("Unlisten on "+c+" for "+d);c={p:c};b&&(c.q=e,c.t=b);this.ua("n",c)}};g.re=function(a,b,c){this.ma?sh(this,"o",a,b,c):this.Lc.push({we:a,action:"o",data:b,G:c})};g.ff=function(a,b,c){this.ma?sh(this,"om",a,b,c):this.Lc.push({we:a,action:"om",data:b,G:c})};
+g.xd=function(a,b){this.ma?sh(this,"oc",a,null,b):this.Lc.push({we:a,action:"oc",data:null,G:b})};function sh(a,b,c,d,e){c={p:c,d:d};a.f("onDisconnect "+b,c);a.ua(b,c,function(a){e&&setTimeout(function(){e(a.s,a.d)},Math.floor(0))})}g.put=function(a,b,c,d){th(this,"p",a,b,c,d)};g.df=function(a,b,c,d){th(this,"m",a,b,c,d)};function th(a,b,c,d,e,f){d={p:c,d:d};p(f)&&(d.h=f);a.pa.push({action:b,rf:d,G:e});a.Pc++;b=a.pa.length-1;a.ma?uh(a,b):a.f("Buffering put: "+c)}
+function uh(a,b){var c=a.pa[b].action,d=a.pa[b].rf,e=a.pa[b].G;a.pa[b].pg=a.ma;a.ua(c,d,function(d){a.f(c+" response",d);delete a.pa[b];a.Pc--;0===a.Pc&&(a.pa=[]);e&&e(d.s,d.d)})}g.ye=function(a){this.ma&&(a={c:a},this.f("reportStats",a),this.ua("s",a,function(a){"ok"!==a.s&&this.f("reportStats","Error sending stats: "+a.d)}))};
+g.wd=function(a){if("r"in a){this.f("from server: "+B(a));var b=a.r,c=this.Gd[b];c&&(delete this.Gd[b],c(a.b))}else{if("error"in a)throw"A server-side error has occurred: "+a.error;"a"in a&&(b=a.a,a=a.b,this.f("handleServerMessage",b,a),"d"===b?this.Hb(a.p,a.d,!1,a.t):"m"===b?this.Hb(a.p,a.d,!0,a.t):"c"===b?vh(this,a.p,a.q):"ac"===b?rh(this,a.s,a.d):"sd"===b?this.ze?this.ze(a):"msg"in a&&"undefined"!==typeof console&&console.log("FIREBASE: "+a.msg.replace("\n","\nFIREBASE: ")):cd("Unrecognized action received from server: "+
+B(b)+"\nAre you using the latest client?"))}};
+g.Mc=function(a,b){this.f("connection ready");this.ma=!0;this.Bc=(new Date).getTime();this.ue({serverTimeOffset:a-(new Date).getTime()});this.Db=b;if(this.Ue){var c={};c["sdk.js."+firebase.SDK_VERSION.replace(/\./g,"-")]=1;"undefined"!==typeof window&&(window.cordova||window.phonegap||window.PhoneGap)&&/ios|iphone|ipod|ipad|android|blackberry|iemobile/i.test("undefined"!==typeof navigator&&"string"===typeof navigator.userAgent?navigator.userAgent:"")?c["framework.cordova"]=1:"object"===typeof navigator&&
+"ReactNative"===navigator.product&&(c["framework.reactnative"]=1);this.ye(c)}wh(this);this.Ue=!1;this.Kc(!0)};function mh(a,b){H(!a.Ia,"Scheduling a connect when we're already connected/ing?");a.vb&&clearTimeout(a.vb);a.vb=setTimeout(function(){a.vb=null;xh(a)},Math.floor(b))}g.ig=function(a){a&&!this.Nb&&this.Va===this.td&&(this.f("Window became visible.  Reducing delay."),this.Va=1E3,this.Ia||mh(this,0));this.Nb=a};
+g.hg=function(a){a?(this.f("Browser went online."),this.Va=1E3,this.Ia||mh(this,0)):(this.f("Browser went offline.  Killing connection."),this.Ia&&this.Ia.close())};
+g.hf=function(){this.f("data client disconnected");this.ma=!1;this.Ia=null;for(var a=0;a<this.pa.length;a++){var b=this.pa[a];b&&"h"in b.rf&&b.pg&&(b.G&&b.G("disconnect"),delete this.pa[a],this.Pc--)}0===this.Pc&&(this.pa=[]);this.Gd={};yh(this)&&(this.Nb?this.Bc&&(3E4<(new Date).getTime()-this.Bc&&(this.Va=1E3),this.Bc=null):(this.f("Window isn't visible.  Delaying reconnect."),this.Va=this.td,this.me=(new Date).getTime()),a=Math.max(0,this.Va-((new Date).getTime()-this.me)),a*=Math.random(),this.f("Trying to reconnect in "+
+a+"ms"),mh(this,a),this.Va=Math.min(this.td,1.3*this.Va));this.Kc(!1)};
+function xh(a){if(yh(a)){a.f("Making a connection attempt");a.me=(new Date).getTime();a.Bc=null;var b=r(a.wd,a),c=r(a.Mc,a),d=r(a.hf,a),e=a.id+":"+nh++,f=a.Db,h=!1,k=null,m=function(){k?k.close():(h=!0,d())};a.Ia={close:m,ua:function(a){H(k,"sendRequest call when we're not connected not allowed.");k.ua(a)}};var l=a.de;a.de=!1;a.Vd.getToken(l).then(function(l){h?E("getToken() completed but was canceled"):(E("getToken() completed. Creating connection."),a.pb=l&&l.accessToken,k=new Ye(e,a.M,b,c,d,function(b){O(b+
+" ("+a.M.toString()+")");a.eb("server_kill")},f))}).then(null,function(b){a.f("Failed to get token: "+b);h||m()})}}g.eb=function(a){E("Interrupting connection for reason: "+a);this.qd[a]=!0;this.Ia?this.Ia.close():(this.vb&&(clearTimeout(this.vb),this.vb=null),this.ma&&this.hf())};g.lc=function(a){E("Resuming connection for reason: "+a);delete this.qd[a];xa(this.qd)&&(this.Va=1E3,this.Ia||mh(this,0))};
+function vh(a,b,c){c=c?La(c,function(a){return jd(a)}).join("$"):"default";(a=ph(a,b,c))&&a.G&&a.G("permission_denied")}function ph(a,b,c){b=(new L(b)).toString();var d;p(a.$[b])?(d=a.$[b][c],delete a.$[b][c],0===qa(a.$[b])&&delete a.$[b]):d=void 0;return d}
+function rh(a,b,c){E("Auth token revoked: "+b+"/"+c);a.pb=null;a.de=!0;a.Ia.close();"invalid_token"===b&&(a.ke++,3<=a.ke&&(a.Va=3E4,O("Provided authentication credentials are invalid. This usually indicates your FirebaseApp instance was not initialized correctly. Make sure your apiKey and databaseURL match the values provided for your app at https://console.firebase.google.com/, or if you're using a service account, make sure it's authorized to access the specified databaseURL and is from the correct project.")))}
+function wh(a){qh(a);t(a.$,function(b){t(b,function(b){oh(a,b)})});for(var b=0;b<a.pa.length;b++)a.pa[b]&&uh(a,b);for(;a.Lc.length;)b=a.Lc.shift(),sh(a,b.action,b.we,b.data,b.G)}function yh(a){var b;b=Of.Wb().ic;return xa(a.qd)&&b};var Y={Wf:function(){Ne=td=!0}};Y.forceLongPolling=Y.Wf;Y.Xf=function(){Oe=!0};Y.forceWebSockets=Y.Xf;Y.cg=function(){return rd.isAvailable()};Y.isWebSocketsAvailable=Y.cg;Y.vg=function(a,b){a.w.Ua.ze=b};Y.setSecurityDebugCallback=Y.vg;Y.Be=function(a,b){a.w.Be(b)};Y.stats=Y.Be;Y.Ce=function(a,b){a.w.Ce(b)};Y.statsIncrementCounter=Y.Ce;Y.ed=function(a){return a.w.ed};Y.dataUpdateCount=Y.ed;Y.bg=function(a,b){a.w.je=b};Y.interceptServerData=Y.bg;function zh(a){this.wa=Q;this.lb=new Yg;this.De={};this.jc={};this.Dc=a}function Ah(a,b,c,d,e){var f=a.lb,h=e;H(d>f.Cc,"Stacking an older write on top of newer ones");p(h)||(h=!0);f.la.push({path:b,Ja:c,Zc:d,visible:h});h&&(f.T=Og(f.T,b,c));f.Cc=d;return e?Bh(a,new Zb(Jg,b,c)):[]}function Ch(a,b,c,d){var e=a.lb;H(d>e.Cc,"Stacking an older merge on top of newer ones");e.la.push({path:b,children:c,Zc:d,visible:!0});e.T=Pg(e.T,b,c);e.Cc=d;c=xg(c);return Bh(a,new Cd(Jg,b,c))}
+function Dh(a,b,c){c=c||!1;var d=Zg(a.lb,b);if(a.lb.Ed(b)){var e=Q;null!=d.Ja?e=e.set(C,!0):Cb(d.children,function(a,b){e=e.set(new L(a),b)});return Bh(a,new Ig(d.path,e,c))}return[]}function Eh(a,b,c){c=xg(c);return Bh(a,new Cd(Lg,b,c))}function Fh(a,b,c,d){d=Gh(a,d);if(null!=d){var e=Hh(d);d=e.path;e=e.Ib;b=T(d,b);c=new Zb(new Kg(!1,!0,e,!0),b,c);return Ih(a,d,c)}return[]}
+function Jh(a,b,c,d){if(d=Gh(a,d)){var e=Hh(d);d=e.path;e=e.Ib;b=T(d,b);c=xg(c);c=new Cd(new Kg(!1,!0,e,!0),b,c);return Ih(a,d,c)}return[]}
+zh.prototype.Ob=function(a,b){var c=a.path,d=null,e=!1;Eg(this.wa,c,function(a,b){var f=T(a,c);d=d||b.jb(f);e=e||null!=Vg(b)});var f=this.wa.get(c);f?(e=e||null!=Vg(f),d=d||f.jb(C)):(f=new Ug,this.wa=this.wa.set(c,f));var h;null!=d?h=!0:(h=!1,d=F,Hg(this.wa.subtree(c),function(a,b){var c=b.jb(C);c&&(d=d.U(a,c))}));var k=null!=Xg(f,a);if(!k&&!S(a.n)){var m=Kh(a);H(!(m in this.jc),"View does not exist, but we have a tag");var l=Lh++;this.jc[m]=l;this.De["_"+l]=m}h=f.Ob(a,b,new ch(c,this.lb),d,h);k||
+e||(f=Xg(f,a),h=h.concat(Mh(this,a,f)));return h};
+zh.prototype.mb=function(a,b,c){var d=a.path,e=this.wa.get(d),f=[];if(e&&("default"===a.ya()||null!=Xg(e,a))){f=e.mb(a,b,c);e.e()&&(this.wa=this.wa.remove(d));e=f.rg;f=f.Sf;b=-1!==Pa(e,function(a){return S(a.n)});var h=Cg(this.wa,d,function(a,b){return null!=Vg(b)});if(b&&!h&&(d=this.wa.subtree(d),!d.e()))for(var d=Nh(d),k=0;k<d.length;++k){var m=d[k],l=m.W,m=Oh(this,m);this.Dc.Ae(Ph(l),Qh(this,l),m.ld,m.G)}if(!h&&0<e.length&&!c)if(b)this.Dc.Od(Ph(a),null);else{var u=this;Ja(e,function(a){a.ya();
+var b=u.jc[Kh(a)];u.Dc.Od(Ph(a),b)})}Rh(this,e)}return f};zh.prototype.Ba=function(a,b){var c=this.lb,d=Cg(this.wa,a,function(b,c){var d=T(b,a);if(d=c.jb(d))return d});return c.Ba(a,d,b,!0)};function Nh(a){return Ag(a,function(a,c,d){if(c&&null!=Vg(c))return[Vg(c)];var e=[];c&&(e=Wg(c));t(d,function(a){e=e.concat(a)});return e})}function Rh(a,b){for(var c=0;c<b.length;++c){var d=b[c];if(!S(d.n)){var d=Kh(d),e=a.jc[d];delete a.jc[d];delete a.De["_"+e]}}}
+function Ph(a){return S(a.n)&&!zd(a.n)?a.xb():a}function Mh(a,b,c){var d=b.path,e=Qh(a,b);c=Oh(a,c);b=a.Dc.Ae(Ph(b),e,c.ld,c.G);d=a.wa.subtree(d);if(e)H(null==Vg(d.value),"If we're adding a query, it shouldn't be shadowed");else for(e=Ag(d,function(a,b,c){if(!a.e()&&b&&null!=Vg(b))return[lg(Vg(b))];var d=[];b&&(d=d.concat(La(Wg(b),function(a){return a.W})));t(c,function(a){d=d.concat(a)});return d}),d=0;d<e.length;++d)c=e[d],a.Dc.Od(Ph(c),Qh(a,c));return b}
+function Oh(a,b){var c=b.W,d=Qh(a,c);return{ld:function(){return(b.u()||F).hash()},G:function(b){if("ok"===b){if(d){var f=c.path;if(b=Gh(a,d)){var h=Hh(b);b=h.path;h=h.Ib;f=T(b,f);f=new ac(new Kg(!1,!0,h,!0),f);b=Ih(a,b,f)}else b=[]}else b=Bh(a,new ac(Lg,c.path));return b}f="Unknown Error";"too_big"===b?f="The data requested exceeds the maximum size that can be accessed with a single request.":"permission_denied"==b?f="Client doesn't have permission to access the desired data.":"unavailable"==b&&
+(f="The service is unavailable");f=Error(b+" at "+c.path.toString()+": "+f);f.code=b.toUpperCase();return a.mb(c,null,f)}}}function Kh(a){return a.path.toString()+"$"+a.ya()}function Hh(a){var b=a.indexOf("$");H(-1!==b&&b<a.length-1,"Bad queryKey.");return{Ib:a.substr(b+1),path:new L(a.substr(0,b))}}function Gh(a,b){var c=a.De,d="_"+b;return d in c?c[d]:void 0}function Qh(a,b){var c=Kh(b);return x(a.jc,c)}var Lh=1;
+function Ih(a,b,c){var d=a.wa.get(b);H(d,"Missing sync point for query tag that we're tracking");return d.gb(c,new ch(b,a.lb),null)}function Bh(a,b){return Sh(a,b,a.wa,null,new ch(C,a.lb))}function Sh(a,b,c,d,e){if(b.path.e())return Th(a,b,c,d,e);var f=c.get(C);null==d&&null!=f&&(d=f.jb(C));var h=[],k=J(b.path),m=b.Nc(k);if((c=c.children.get(k))&&m)var l=d?d.R(k):null,k=e.m(k),h=h.concat(Sh(a,m,c,l,k));f&&(h=h.concat(f.gb(b,e,d)));return h}
+function Th(a,b,c,d,e){var f=c.get(C);null==d&&null!=f&&(d=f.jb(C));var h=[];c.children.ia(function(c,f){var l=d?d.R(c):null,u=e.m(c),z=b.Nc(c);z&&(h=h.concat(Th(a,z,f,l,u)))});f&&(h=h.concat(f.gb(b,e,d)));return h};function pf(a,b,c){this.app=c;var d=new cc(c);this.M=a;this.Xa=oc(a);this.Vc=null;this.da=new qc;this.vd=1;this.Ua=null;if(b||0<=("object"===typeof window&&window.navigator&&window.navigator.userAgent||"").search(/googlebot|google webmaster tools|bingbot|yahoo! slurp|baiduspider|yandexbot|duckduckbot/i))this.va=new xd(this.M,r(this.Hb,this),d),setTimeout(r(this.Kc,this,!0),0);else{b=c.options.databaseAuthVariableOverride||null;if(null!==b){if("object"!==ca(b))throw Error("Only objects are supported for option databaseAuthVariableOverride");
+try{B(b)}catch(e){throw Error("Invalid authOverride provided: "+e);}}this.va=this.Ua=new kh(this.M,r(this.Hb,this),r(this.Kc,this),r(this.ue,this),d,b)}var f=this;dc(d,function(a){f.va.pf(a)});this.xg=pc(a,r(function(){return new ic(this.Xa,this.va)},this));this.nc=new eh;this.ie=new ec;this.pd=new zh({Ae:function(a,b,c,d){b=[];c=f.ie.j(a.path);c.e()||(b=Bh(f.pd,new Zb(Lg,a.path,c)),setTimeout(function(){d("ok")},0));return b},Od:aa});Uh(this,"connected",!1);this.ja=new Qc;this.$a=new of(this);this.ed=
+0;this.je=null;this.K=new zh({Ae:function(a,b,c,d){f.va.cf(a,c,b,function(b,c){var e=d(b,c);vc(f.da,a.path,e)});return[]},Od:function(a,b){f.va.Df(a,b)}})}g=pf.prototype;g.toString=function(){return(this.M.Sc?"https://":"http://")+this.M.host};g.name=function(){return this.M.pe};function Vh(a){a=a.ie.j(new L(".info/serverTimeOffset")).H()||0;return(new Date).getTime()+a}function Wh(a){a=a={timestamp:Vh(a)};a.timestamp=a.timestamp||(new Date).getTime();return a}
+g.Hb=function(a,b,c,d){this.ed++;var e=new L(a);b=this.je?this.je(a,b):b;a=[];d?c?(b=oa(b,function(a){return M(a)}),a=Jh(this.K,e,b,d)):(b=M(b),a=Fh(this.K,e,b,d)):c?(d=oa(b,function(a){return M(a)}),a=Eh(this.K,e,d)):(d=M(b),a=Bh(this.K,new Zb(Lg,e,d)));d=e;0<a.length&&(d=Xh(this,e));vc(this.da,d,a)};g.Kc=function(a){Uh(this,"connected",a);!1===a&&Yh(this)};g.ue=function(a){var b=this;ld(a,function(a,d){Uh(b,d,a)})};
+function Uh(a,b,c){b=new L("/.info/"+b);c=M(c);var d=a.ie;d.Jd=d.Jd.F(b,c);c=Bh(a.pd,new Zb(Lg,b,c));vc(a.da,b,c)}g.Kb=function(a,b,c,d){this.f("set",{path:a.toString(),value:b,Dg:c});var e=Wh(this);b=M(b,c);var e=Tc(b,e),f=this.vd++,e=Ah(this.K,a,e,f,!0);rc(this.da,e);var h=this;this.va.put(a.toString(),b.H(!0),function(b,c){var e="ok"===b;e||O("set at "+a+" failed: "+b);e=Dh(h.K,f,!e);vc(h.da,a,e);Zh(d,b,c)});e=$h(this,a);Xh(this,e);vc(this.da,e,[])};
+g.update=function(a,b,c){this.f("update",{path:a.toString(),value:b});var d=!0,e=Wh(this),f={};t(b,function(a,b){d=!1;var c=M(a);f[b]=Tc(c,e)});if(d)E("update() called with empty data.  Don't do anything."),Zh(c,"ok");else{var h=this.vd++,k=Ch(this.K,a,f,h);rc(this.da,k);var m=this;this.va.df(a.toString(),b,function(b,d){var e="ok"===b;e||O("update at "+a+" failed: "+b);var e=Dh(m.K,h,!e),f=a;0<e.length&&(f=Xh(m,a));vc(m.da,f,e);Zh(c,b,d)});b=$h(this,a);Xh(this,b);vc(this.da,a,[])}};
+function Yh(a){a.f("onDisconnectEvents");var b=Wh(a),c=[];Rc(Pc(a.ja,b),C,function(b,e){c=c.concat(Bh(a.K,new Zb(Lg,b,e)));var f=$h(a,b);Xh(a,f)});a.ja=new Qc;vc(a.da,C,c)}g.xd=function(a,b){var c=this;this.va.xd(a.toString(),function(d,e){"ok"===d&&vf(c.ja,a);Zh(b,d,e)})};function Jf(a,b,c,d){var e=M(c);a.va.re(b.toString(),e.H(!0),function(c,h){"ok"===c&&Sc(a.ja,b,e);Zh(d,c,h)})}function Kf(a,b,c,d,e){var f=M(c,d);a.va.re(b.toString(),f.H(!0),function(c,d){"ok"===c&&Sc(a.ja,b,f);Zh(e,c,d)})}
+function Lf(a,b,c,d){var e=!0,f;for(f in c)e=!1;e?(E("onDisconnect().update() called with empty data.  Don't do anything."),Zh(d,"ok")):a.va.ff(b.toString(),c,function(e,f){if("ok"===e)for(var m in c){var l=M(c[m]);Sc(a.ja,b.m(m),l)}Zh(d,e,f)})}function ug(a,b,c){c=".info"===J(b.path)?a.pd.Ob(b,c):a.K.Ob(b,c);tc(a.da,b.path,c)}g.eb=function(){this.Ua&&this.Ua.eb("repo_interrupt")};g.lc=function(){this.Ua&&this.Ua.lc("repo_interrupt")};
+g.Be=function(a){if("undefined"!==typeof console){a?(this.Vc||(this.Vc=new jc(this.Xa)),a=this.Vc.get()):a=this.Xa.get();var b=Ma(ta(a),function(a,b){return Math.max(b.length,a)},0),c;for(c in a){for(var d=a[c],e=c.length;e<b+2;e++)c+=" ";console.log(c+d)}}};g.Ce=function(a){lc(this.Xa,a);this.xg.yf[a]=!0};g.f=function(a){var b="";this.Ua&&(b=this.Ua.id+":");E(b,arguments)};
+function Zh(a,b,c){a&&Tb(function(){if("ok"==b)a(null);else{var d=(b||"error").toUpperCase(),e=d;c&&(e+=": "+c);e=Error(e);e.code=d;a(e)}})};function ai(a,b,c,d,e){function f(){}a.f("transaction on "+b);var h=new U(a,b);h.hc("value",f);c={path:b,update:c,G:d,status:null,kf:Vc(),Ie:e,uf:0,Rd:function(){h.Jc("value",f)},Td:null,Da:null,bd:null,cd:null,dd:null};d=a.K.Ba(b,void 0)||F;c.bd=d;d=c.update(d.H());if(p(d)){Bf("transaction failed: Data returned ",d,c.path);c.status=1;e=fh(a.nc,b);var k=e.Ea()||[];k.push(c);gh(e,k);"object"===typeof d&&null!==d&&Bb(d,".priority")?(k=x(d,".priority"),H(zf(k),"Invalid priority returned by transaction. Priority must be a valid string, finite number, server value, or null.")):
+k=(a.K.Ba(b)||F).C().H();e=Wh(a);d=M(d,k);e=Tc(d,e);c.cd=d;c.dd=e;c.Da=a.vd++;c=Ah(a.K,b,e,c.Da,c.Ie);vc(a.da,b,c);bi(a)}else c.Rd(),c.cd=null,c.dd=null,c.G&&(a=new W(c.bd,new U(a,c.path),N),c.G(null,!1,a))}function bi(a,b){var c=b||a.nc;b||ci(a,c);if(null!==c.Ea()){var d=di(a,c);H(0<d.length,"Sending zero length transaction queue");Na(d,function(a){return 1===a.status})&&ei(a,c.path(),d)}else c.kd()&&c.P(function(b){bi(a,b)})}
+function ei(a,b,c){for(var d=La(c,function(a){return a.Da}),e=a.K.Ba(b,d)||F,d=e,e=e.hash(),f=0;f<c.length;f++){var h=c[f];H(1===h.status,"tryToSendTransactionQueue_: items in queue should all be run.");h.status=2;h.uf++;var k=T(b,h.path),d=d.F(k,h.cd)}d=d.H(!0);a.va.put(b.toString(),d,function(d){a.f("transaction put response",{path:b.toString(),status:d});var e=[];if("ok"===d){d=[];for(f=0;f<c.length;f++){c[f].status=3;e=e.concat(Dh(a.K,c[f].Da));if(c[f].G){var h=c[f].dd,k=new U(a,c[f].path);d.push(r(c[f].G,
+null,null,!0,new W(h,k,N)))}c[f].Rd()}ci(a,fh(a.nc,b));bi(a);vc(a.da,b,e);for(f=0;f<d.length;f++)Tb(d[f])}else{if("datastale"===d)for(f=0;f<c.length;f++)c[f].status=4===c[f].status?5:1;else for(O("transaction at "+b.toString()+" failed: "+d),f=0;f<c.length;f++)c[f].status=5,c[f].Td=d;Xh(a,b)}},e)}function Xh(a,b){var c=fi(a,b),d=c.path(),c=di(a,c);gi(a,c,d);return d}
+function gi(a,b,c){if(0!==b.length){for(var d=[],e=[],f=La(b,function(a){return a.Da}),h=0;h<b.length;h++){var k=b[h],m=T(c,k.path),l=!1,u;H(null!==m,"rerunTransactionsUnderNode_: relativePath should not be null.");if(5===k.status)l=!0,u=k.Td,e=e.concat(Dh(a.K,k.Da,!0));else if(1===k.status)if(25<=k.uf)l=!0,u="maxretry",e=e.concat(Dh(a.K,k.Da,!0));else{var z=a.K.Ba(k.path,f)||F;k.bd=z;var G=b[h].update(z.H());p(G)?(Bf("transaction failed: Data returned ",G,k.path),m=M(G),"object"===typeof G&&null!=
+G&&Bb(G,".priority")||(m=m.ga(z.C())),z=k.Da,G=Wh(a),G=Tc(m,G),k.cd=m,k.dd=G,k.Da=a.vd++,Qa(f,z),e=e.concat(Ah(a.K,k.path,G,k.Da,k.Ie)),e=e.concat(Dh(a.K,z,!0))):(l=!0,u="nodata",e=e.concat(Dh(a.K,k.Da,!0)))}vc(a.da,c,e);e=[];l&&(b[h].status=3,setTimeout(b[h].Rd,Math.floor(0)),b[h].G&&("nodata"===u?(k=new U(a,b[h].path),d.push(r(b[h].G,null,null,!1,new W(b[h].bd,k,N)))):d.push(r(b[h].G,null,Error(u),!1,null))))}ci(a,a.nc);for(h=0;h<d.length;h++)Tb(d[h]);bi(a)}}
+function fi(a,b){for(var c,d=a.nc;null!==(c=J(b))&&null===d.Ea();)d=fh(d,c),b=D(b);return d}function di(a,b){var c=[];hi(a,b,c);c.sort(function(a,b){return a.kf-b.kf});return c}function hi(a,b,c){var d=b.Ea();if(null!==d)for(var e=0;e<d.length;e++)c.push(d[e]);b.P(function(b){hi(a,b,c)})}function ci(a,b){var c=b.Ea();if(c){for(var d=0,e=0;e<c.length;e++)3!==c[e].status&&(c[d]=c[e],d++);c.length=d;gh(b,0<c.length?c:null)}b.P(function(b){ci(a,b)})}
+function $h(a,b){var c=fi(a,b).path(),d=fh(a.nc,b);jh(d,function(b){ii(a,b)});ii(a,d);ih(d,function(b){ii(a,b)});return c}
+function ii(a,b){var c=b.Ea();if(null!==c){for(var d=[],e=[],f=-1,h=0;h<c.length;h++)4!==c[h].status&&(2===c[h].status?(H(f===h-1,"All SENT items should be at beginning of queue."),f=h,c[h].status=4,c[h].Td="set"):(H(1===c[h].status,"Unexpected transaction status in abort"),c[h].Rd(),e=e.concat(Dh(a.K,c[h].Da,!0)),c[h].G&&d.push(r(c[h].G,null,Error("set"),!1,null))));-1===f?gh(b,null):c.length=f+1;vc(a.da,b.path(),e);for(h=0;h<d.length;h++)Tb(d[h])}};function uf(){this.nb={};this.Ef=!1}uf.prototype.eb=function(){for(var a in this.nb)this.nb[a].eb()};uf.prototype.lc=function(){for(var a in this.nb)this.nb[a].lc()};uf.prototype.ce=function(a){this.Ef=a};ba(uf);uf.prototype.interrupt=uf.prototype.eb;uf.prototype.resume=uf.prototype.lc;var Z={};Z.pc=kh;Z.DataConnection=Z.pc;kh.prototype.wg=function(a,b){this.ua("q",{p:a},b)};Z.pc.prototype.simpleListen=Z.pc.prototype.wg;kh.prototype.Pf=function(a,b){this.ua("echo",{d:a},b)};Z.pc.prototype.echo=Z.pc.prototype.Pf;kh.prototype.interrupt=kh.prototype.eb;Z.Hf=Ye;Z.RealTimeConnection=Z.Hf;Ye.prototype.sendRequest=Ye.prototype.ua;Ye.prototype.close=Ye.prototype.close;
+Z.ag=function(a){var b=kh.prototype.put;kh.prototype.put=function(c,d,e,f){p(f)&&(f=a());b.call(this,c,d,e,f)};return function(){kh.prototype.put=b}};Z.hijackHash=Z.ag;Z.Gf=fc;Z.ConnectionTarget=Z.Gf;Z.ya=function(a){return a.ya()};Z.queryIdentifier=Z.ya;Z.dg=function(a){return a.w.Ua.$};Z.listens=Z.dg;Z.ce=function(a){uf.Wb().ce(a)};Z.forceRestClient=Z.ce;Z.Context=uf;function U(a,b){if(!(a instanceof pf))throw Error("new Firebase() no longer supported - use app.database().");X.call(this,a,b,Be,!1);this.then=void 0;this["catch"]=void 0}ka(U,X);g=U.prototype;g.getKey=function(){y("Firebase.key",0,0,arguments.length);return this.path.e()?null:Xd(this.path)};
+g.m=function(a){y("Firebase.child",1,1,arguments.length);if(fa(a))a=String(a);else if(!(a instanceof L))if(null===J(this.path)){var b=a;b&&(b=b.replace(/^\/*\.info(\/|$)/,"/"));Hf("Firebase.child",b)}else Hf("Firebase.child",a);return new U(this.w,this.path.m(a))};g.getParent=function(){y("Firebase.parent",0,0,arguments.length);var a=this.path.parent();return null===a?null:new U(this.w,a)};
+g.Yf=function(){y("Firebase.ref",0,0,arguments.length);for(var a=this;null!==a.getParent();)a=a.getParent();return a};g.Of=function(){return this.w.$a};g.set=function(a,b){y("Firebase.set",1,2,arguments.length);If("Firebase.set",this.path);Af("Firebase.set",a,this.path,!1);A("Firebase.set",2,b,!0);var c=new Hb;this.w.Kb(this.path,a,null,Ib(c,b));return c.ra};
+g.update=function(a,b){y("Firebase.update",1,2,arguments.length);If("Firebase.update",this.path);if(da(a)){for(var c={},d=0;d<a.length;++d)c[""+d]=a[d];a=c;O("Passing an Array to Firebase.update() is deprecated. Use set() if you want to overwrite the existing data, or an Object with integer keys if you really do want to only update some of the children.")}Df("Firebase.update",a,this.path);A("Firebase.update",2,b,!0);c=new Hb;this.w.update(this.path,a,Ib(c,b));return c.ra};
+g.Kb=function(a,b,c){y("Firebase.setWithPriority",2,3,arguments.length);If("Firebase.setWithPriority",this.path);Af("Firebase.setWithPriority",a,this.path,!1);Ef("Firebase.setWithPriority",2,b);A("Firebase.setWithPriority",3,c,!0);if(".length"===this.getKey()||".keys"===this.getKey())throw"Firebase.setWithPriority failed: "+this.getKey()+" is a read-only object.";var d=new Hb;this.w.Kb(this.path,a,b,Ib(d,c));return d.ra};
+g.remove=function(a){y("Firebase.remove",0,1,arguments.length);If("Firebase.remove",this.path);A("Firebase.remove",1,a,!0);return this.set(null,a)};
+g.transaction=function(a,b,c){y("Firebase.transaction",1,3,arguments.length);If("Firebase.transaction",this.path);A("Firebase.transaction",1,a,!1);A("Firebase.transaction",2,b,!0);if(p(c)&&"boolean"!=typeof c)throw Error(Db("Firebase.transaction",3,!0)+"must be a boolean.");if(".length"===this.getKey()||".keys"===this.getKey())throw"Firebase.transaction failed: "+this.getKey()+" is a read-only object.";"undefined"===typeof c&&(c=!0);var d=new Hb;ga(b)&&Jb(d.ra);ai(this.w,this.path,a,function(a,c,
+h){a?d.reject(a):d.resolve(new Pb(c,h));ga(b)&&b(a,c,h)},c);return d.ra};g.ug=function(a,b){y("Firebase.setPriority",1,2,arguments.length);If("Firebase.setPriority",this.path);Ef("Firebase.setPriority",1,a);A("Firebase.setPriority",2,b,!0);var c=new Hb;this.w.Kb(this.path.m(".priority"),a,null,Ib(c,b));return c.ra};
+g.push=function(a,b){y("Firebase.push",0,2,arguments.length);If("Firebase.push",this.path);Af("Firebase.push",a,this.path,!0);A("Firebase.push",2,b,!0);var c=Vh(this.w),d=Qf(c),c=this.m(d);if(null!=a){var e=this,f=c.set(a,b).then(function(){return e.m(d)});c.then=r(f.then,f);c["catch"]=r(f.then,f,void 0);ga(b)&&Jb(f)}return c};g.kb=function(){If("Firebase.onDisconnect",this.path);return new V(this.w,this.path)};U.prototype.child=U.prototype.m;U.prototype.set=U.prototype.set;U.prototype.update=U.prototype.update;
+U.prototype.setWithPriority=U.prototype.Kb;U.prototype.remove=U.prototype.remove;U.prototype.transaction=U.prototype.transaction;U.prototype.setPriority=U.prototype.ug;U.prototype.push=U.prototype.push;U.prototype.onDisconnect=U.prototype.kb;od(U.prototype,"database",U.prototype.Of);od(U.prototype,"key",U.prototype.getKey);od(U.prototype,"parent",U.prototype.getParent);od(U.prototype,"root",U.prototype.Yf);if("undefined"===typeof firebase)throw Error("Cannot install Firebase Database - be sure to load firebase-app.js first.");
+try{firebase.INTERNAL.registerService("database",function(a){var b=uf.Wb(),c=a.options.databaseURL;p(c)||dd("Can't determine Firebase Database URL.  Be sure to include databaseURL option when calling firebase.intializeApp().");var d=ed(c),c=d.kc;tf("Invalid Firebase Database URL",d);d.path.e()||dd("Database URL must point to the root of a Firebase Database (not including a child path).");(d=x(b.nb,a.name))&&dd("FIREBASE INTERNAL ERROR: Database initialized multiple times.");d=new pf(c,b.Ef,a);b.nb[a.name]=
+d;return d.$a},{Reference:U,Query:X,Database:of,enableLogging:ad,INTERNAL:Y,TEST_ACCESS:Z,ServerValue:rf})}catch(ji){dd("Failed to register the Firebase Database Service ("+ji+")")};})();
+
+(function() {var k,aa=aa||{},m=this,n=function(a){return void 0!==a},ba=function(){},p=function(a){var b=typeof a;if("object"==b)if(a){if(a instanceof Array)return"array";if(a instanceof Object)return b;var c=Object.prototype.toString.call(a);if("[object Window]"==c)return"object";if("[object Array]"==c||"number"==typeof a.length&&"undefined"!=typeof a.splice&&"undefined"!=typeof a.propertyIsEnumerable&&!a.propertyIsEnumerable("splice"))return"array";if("[object Function]"==c||"undefined"!=typeof a.call&&"undefined"!=
+typeof a.propertyIsEnumerable&&!a.propertyIsEnumerable("call"))return"function"}else return"null";else if("function"==b&&"undefined"==typeof a.call)return"object";return b},ca=function(a){var b=p(a);return"array"==b||"object"==b&&"number"==typeof a.length},q=function(a){return"string"==typeof a},r=function(a){return"function"==p(a)},da=function(a){var b=typeof a;return"object"==b&&null!=a||"function"==b},ea="closure_uid_"+(1E9*Math.random()>>>0),fa=0,ga=function(a,b,c){return a.call.apply(a.bind,
+arguments)},ha=function(a,b,c){if(!a)throw Error();if(2<arguments.length){var d=Array.prototype.slice.call(arguments,2);return function(){var c=Array.prototype.slice.call(arguments);Array.prototype.unshift.apply(c,d);return a.apply(b,c)}}return function(){return a.apply(b,arguments)}},t=function(a,b,c){t=Function.prototype.bind&&-1!=Function.prototype.bind.toString().indexOf("native code")?ga:ha;return t.apply(null,arguments)},ia=Date.now||function(){return+new Date},u=function(a,b){function c(){}
+c.prototype=b.prototype;a.G=b.prototype;a.prototype=new c;a.Ma=function(a,c,f){for(var g=Array(arguments.length-2),h=2;h<arguments.length;h++)g[h-2]=arguments[h];return b.prototype[c].apply(a,g)}};var ja=function(a,b,c){function d(){N||(N=!0,b.apply(null,arguments))}function e(b){l=setTimeout(function(){l=null;a(f,2===w)},b)}function f(a,b){if(!N)if(a)d.apply(null,arguments);else if(2===w||B)d.apply(null,arguments);else{64>h&&(h*=2);var c;1===w?(w=2,c=0):c=1E3*(h+Math.random());e(c)}}function g(a){Tb||(Tb=!0,N||(null!==l?(a||(w=2),clearTimeout(l),e(0)):a||(w=1)))}var h=1,l=null,B=!1,w=0,N=!1,Tb=!1;e(0);setTimeout(function(){B=!0;g(!0)},c);return g};var ka="https://firebasestorage.googleapis.com";var v=function(a,b){this.code="storage/"+a;this.message="Firebase Storage: "+b;this.serverResponse=null;this.name="FirebaseError"};u(v,Error);var la=function(){return new v("unknown","An unknown error occurred, please check the error payload for server response.")},ma=function(){return new v("canceled","User canceled the upload/download.")},na=function(a,b,c){return new v("invalid-argument","Invalid argument in `"+b+"` at index "+a+": "+c)},oa=function(){return new v("app-deleted","The Firebase app was deleted.")};var pa=function(a,b){for(var c in a)Object.prototype.hasOwnProperty.call(a,c)&&b(c,a[c])},qa=function(a){var b={};pa(a,function(a,d){b[a]=d});return b};var x=function(a,b,c,d){this.l=a;this.f={};this.i=b;this.b={};this.c="";this.N=c;this.g=this.a=null;this.h=[200];this.j=d};var ra={STATE_CHANGED:"state_changed"},sa={RUNNING:"running",PAUSED:"paused",SUCCESS:"success",CANCELED:"canceled",ERROR:"error"},ta=function(a){switch(a){case "running":case "pausing":case "canceling":return"running";case "paused":return"paused";case "success":return"success";case "canceled":return"canceled";case "error":return"error";default:return"error"}};var y=function(a){return n(a)&&null!==a},ua=function(a){return"string"===typeof a||a instanceof String};var va=function(a,b,c){this.f=c;this.c=a;this.g=b;this.b=0;this.a=null};va.prototype.get=function(){var a;0<this.b?(this.b--,a=this.a,this.a=a.next,a.next=null):a=this.c();return a};var wa=function(a,b){a.g(b);a.b<a.f&&(a.b++,b.next=a.a,a.a=b)};var xa=function(a){if(Error.captureStackTrace)Error.captureStackTrace(this,xa);else{var b=Error().stack;b&&(this.stack=b)}a&&(this.message=String(a))};u(xa,Error);xa.prototype.name="CustomError";var ya=function(a,b,c,d,e){this.reset(a,b,c,d,e)};ya.prototype.a=null;var za=0;ya.prototype.reset=function(a,b,c,d,e){"number"==typeof e||za++;d||ia();this.b=b;delete this.a};var Aa=function(a){var b=[],c=0,d;for(d in a)b[c++]=a[d];return b},Ba=function(a){var b=[],c=0,d;for(d in a)b[c++]=d;return b},Ca="constructor hasOwnProperty isPrototypeOf propertyIsEnumerable toLocaleString toString valueOf".split(" "),Da=function(a,b){for(var c,d,e=1;e<arguments.length;e++){d=arguments[e];for(c in d)a[c]=d[c];for(var f=0;f<Ca.length;f++)c=Ca[f],Object.prototype.hasOwnProperty.call(d,c)&&(a[c]=d[c])}};var Ea=function(a){a.prototype.then=a.prototype.then;a.prototype.$goog_Thenable=!0},Fa=function(a){if(!a)return!1;try{return!!a.$goog_Thenable}catch(b){return!1}};var Ga=function(a){Ga[" "](a);return a};Ga[" "]=ba;var Ha=function(a,b){for(var c=a.split("%s"),d="",e=Array.prototype.slice.call(arguments,1);e.length&&1<c.length;)d+=c.shift()+e.shift();return d+c.join("%s")},Ia=String.prototype.trim?function(a){return a.trim()}:function(a){return a.replace(/^[\s\xa0]+|[\s\xa0]+$/g,"")},Ja=function(a,b){return a<b?-1:a>b?1:0};var Ka=function(a,b){this.a=a;this.b=b};Ka.prototype.clone=function(){return new Ka(this.a,this.b)};var z=function(a,b){this.bucket=a;this.path=b},La=function(a){var b=encodeURIComponent;return"/b/"+b(a.bucket)+"/o/"+b(a.path)},Ma=function(a){for(var b=null,c=[{ja:/^gs:\/\/([A-Za-z0-9.\-]+)(\/(.*))?$/i,aa:{bucket:1,path:3},ia:function(a){"/"===a.path.charAt(a.path.length-1)&&(a.path=a.path.slice(0,-1))}},{ja:/^https?:\/\/firebasestorage\.googleapis\.com\/v[A-Za-z0-9_]+\/b\/([A-Za-z0-9.\-]+)\/o(\/([^?#]*).*)?$/i,aa:{bucket:1,path:3},ia:function(a){a.path=decodeURIComponent(a.path)}}],d=0;d<c.length;d++){var e=
+c[d],f=e.ja.exec(a);if(f){b=f[e.aa.bucket];(f=f[e.aa.path])||(f="");b=new z(b,f);e.ia(b);break}}if(null==b)throw new v("invalid-url","Invalid URL '"+a+"'.");return b};var Na=function(a,b,c){r(a)||y(b)||y(c)?(this.next=a,this.error=b||null,this.a=c||null):(this.next=a.next||null,this.error=a.error||null,this.a=a.complete||null)};var Oa=function(a){var b=encodeURIComponent,c="?";pa(a,function(a,e){a=b(a)+"="+b(e);c=c+a+"&"});return c=c.slice(0,-1)};var A=function(a,b,c,d,e,f){this.b=a;this.h=b;this.f=c;this.a=d;this.g=e;this.c=f};k=A.prototype;k.qa=function(){return this.b};k.La=function(){return this.h};k.Ia=function(){return this.f};k.Da=function(){return this.a};k.sa=function(){if(y(this.a)){var a=this.a.downloadURLs;return y(a)&&y(a[0])?a[0]:null}return null};k.Ka=function(){return this.g};k.Ga=function(){return this.c};var Pa=function(a,b){b.unshift(a);xa.call(this,Ha.apply(null,b));b.shift()};u(Pa,xa);Pa.prototype.name="AssertionError";
+var Qa=function(a,b,c,d){var e="Assertion failed";if(c)var e=e+(": "+c),f=d;else a&&(e+=": "+a,f=b);throw new Pa(""+e,f||[]);},C=function(a,b,c){a||Qa("",null,b,Array.prototype.slice.call(arguments,2))},Ra=function(a,b){throw new Pa("Failure"+(a?": "+a:""),Array.prototype.slice.call(arguments,1));},Sa=function(a,b,c){r(a)||Qa("Expected function but got %s: %s.",[p(a),a],b,Array.prototype.slice.call(arguments,2))};var D=function(){this.g=this.g;this.s=this.s};D.prototype.g=!1;D.prototype.fa=function(){this.g||(this.g=!0,this.A())};D.prototype.A=function(){if(this.s)for(;this.s.length;)this.s.shift()()};var Ta="closure_listenable_"+(1E6*Math.random()|0),Ua=0;var Wa;a:{var Xa=m.navigator;if(Xa){var Ya=Xa.userAgent;if(Ya){Wa=Ya;break a}}Wa=""}var E=function(a){return-1!=Wa.indexOf(a)};var Za=function(){};Za.prototype.a=null;var ab=function(a){var b;(b=a.a)||(b={},$a(a)&&(b[0]=!0,b[1]=!0),b=a.a=b);return b};var bb=Array.prototype.indexOf?function(a,b,c){C(null!=a.length);return Array.prototype.indexOf.call(a,b,c)}:function(a,b,c){c=null==c?0:0>c?Math.max(0,a.length+c):c;if(q(a))return q(b)&&1==b.length?a.indexOf(b,c):-1;for(;c<a.length;c++)if(c in a&&a[c]===b)return c;return-1},cb=Array.prototype.forEach?function(a,b,c){C(null!=a.length);Array.prototype.forEach.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=q(a)?a.split(""):a,f=0;f<d;f++)f in e&&b.call(c,e[f],f,a)},db=Array.prototype.filter?function(a,
+b,c){C(null!=a.length);return Array.prototype.filter.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=[],f=0,g=q(a)?a.split(""):a,h=0;h<d;h++)if(h in g){var l=g[h];b.call(c,l,h,a)&&(e[f++]=l)}return e},eb=Array.prototype.map?function(a,b,c){C(null!=a.length);return Array.prototype.map.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=Array(d),f=q(a)?a.split(""):a,g=0;g<d;g++)g in f&&(e[g]=b.call(c,f[g],g,a));return e},fb=Array.prototype.some?function(a,b,c){C(null!=a.length);return Array.prototype.some.call(a,
+b,c)}:function(a,b,c){for(var d=a.length,e=q(a)?a.split(""):a,f=0;f<d;f++)if(f in e&&b.call(c,e[f],f,a))return!0;return!1},hb=function(a){var b;a:{b=gb;for(var c=a.length,d=q(a)?a.split(""):a,e=0;e<c;e++)if(e in d&&b.call(void 0,d[e],e,a)){b=e;break a}b=-1}return 0>b?null:q(a)?a.charAt(b):a[b]},ib=function(a){if("array"!=p(a))for(var b=a.length-1;0<=b;b--)delete a[b];a.length=0},jb=function(a,b){b=bb(a,b);var c;if(c=0<=b)C(null!=a.length),Array.prototype.splice.call(a,b,1);return c},kb=function(a){var b=
+a.length;if(0<b){for(var c=Array(b),d=0;d<b;d++)c[d]=a[d];return c}return[]};var mb=new va(function(){return new lb},function(a){a.reset()},100),ob=function(){var a=nb,b=null;a.a&&(b=a.a,a.a=a.a.next,a.a||(a.b=null),b.next=null);return b},lb=function(){this.next=this.b=this.a=null};lb.prototype.set=function(a,b){this.a=a;this.b=b;this.next=null};lb.prototype.reset=function(){this.next=this.b=this.a=null};var pb=function(a,b){this.type=a;this.a=this.target=b;this.ka=!0};pb.prototype.b=function(){this.ka=!1};var qb=function(a,b,c,d,e){this.listener=a;this.a=null;this.src=b;this.type=c;this.U=!!d;this.N=e;++Ua;this.O=this.T=!1},rb=function(a){a.O=!0;a.listener=null;a.a=null;a.src=null;a.N=null};var sb=/^(?:([^:/?#.]+):)?(?:\/\/(?:([^/?#]*)@)?([^/#?]*?)(?::([0-9]+))?(?=[/#?]|$))?([^?#]+)?(?:\?([^#]*))?(?:#(.*))?$/;var tb=function(a,b){b=db(b.split("/"),function(a){return 0<a.length}).join("/");return 0===a.length?b:a+"/"+b},ub=function(a){var b=a.lastIndexOf("/",a.length-2);return-1===b?a:a.slice(b+1)};var vb=function(a){this.src=a;this.a={};this.b=0},xb=function(a,b,c,d,e,f){var g=b.toString();b=a.a[g];b||(b=a.a[g]=[],a.b++);var h=wb(b,c,e,f);-1<h?(a=b[h],d||(a.T=!1)):(a=new qb(c,a.src,g,!!e,f),a.T=d,b.push(a));return a},yb=function(a,b){var c=b.type;c in a.a&&jb(a.a[c],b)&&(rb(b),0==a.a[c].length&&(delete a.a[c],a.b--))},wb=function(a,b,c,d){for(var e=0;e<a.length;++e){var f=a[e];if(!f.O&&f.listener==b&&f.U==!!c&&f.N==d)return e}return-1};var zb,Ab=function(){};u(Ab,Za);var Bb=function(a){return(a=$a(a))?new ActiveXObject(a):new XMLHttpRequest},$a=function(a){if(!a.b&&"undefined"==typeof XMLHttpRequest&&"undefined"!=typeof ActiveXObject){for(var b=["MSXML2.XMLHTTP.6.0","MSXML2.XMLHTTP.3.0","MSXML2.XMLHTTP","Microsoft.XMLHTTP"],c=0;c<b.length;c++){var d=b[c];try{return new ActiveXObject(d),a.b=d}catch(e){}}throw Error("Could not create ActiveXObject. ActiveX might be disabled, or MSXML might not be installed");}return a.b};zb=new Ab;var Cb=function(a){this.a=[];if(a)a:{var b;if(a instanceof Cb){if(b=a.D(),a=a.w(),0>=this.o()){for(var c=this.a,d=0;d<b.length;d++)c.push(new Ka(b[d],a[d]));break a}}else b=Ba(a),a=Aa(a);for(d=0;d<b.length;d++)Db(this,b[d],a[d])}},Db=function(a,b,c){var d=a.a;d.push(new Ka(b,c));b=d.length-1;a=a.a;for(c=a[b];0<b;)if(d=b-1>>1,a[d].a>c.a)a[b]=a[d],b=d;else break;a[b]=c};k=Cb.prototype;k.w=function(){for(var a=this.a,b=[],c=a.length,d=0;d<c;d++)b.push(a[d].b);return b};
+k.D=function(){for(var a=this.a,b=[],c=a.length,d=0;d<c;d++)b.push(a[d].a);return b};k.clone=function(){return new Cb(this)};k.o=function(){return this.a.length};k.F=function(){return 0==this.a.length};k.clear=function(){ib(this.a)};var Eb=function(){this.b=[];this.a=[]},Fb=function(a){0==a.b.length&&(a.b=a.a,a.b.reverse(),a.a=[]);return a.b.pop()};Eb.prototype.o=function(){return this.b.length+this.a.length};Eb.prototype.F=function(){return 0==this.b.length&&0==this.a.length};Eb.prototype.clear=function(){this.b=[];this.a=[]};Eb.prototype.w=function(){for(var a=[],b=this.b.length-1;0<=b;--b)a.push(this.b[b]);for(var c=this.a.length,b=0;b<c;++b)a.push(this.a[b]);return a};var Gb=function(a){if(a.w&&"function"==typeof a.w)return a.w();if(q(a))return a.split("");if(ca(a)){for(var b=[],c=a.length,d=0;d<c;d++)b.push(a[d]);return b}return Aa(a)},Hb=function(a,b){if(a.forEach&&"function"==typeof a.forEach)a.forEach(b,void 0);else if(ca(a)||q(a))cb(a,b,void 0);else{var c;if(a.D&&"function"==typeof a.D)c=a.D();else if(a.w&&"function"==typeof a.w)c=void 0;else if(ca(a)||q(a)){c=[];for(var d=a.length,e=0;e<d;e++)c.push(e)}else c=Ba(a);for(var d=Gb(a),e=d.length,f=0;f<e;f++)b.call(void 0,
+d[f],c&&c[f],a)}};var Ib=function(a){m.setTimeout(function(){throw a;},0)},Jb,Kb=function(){var a=m.MessageChannel;"undefined"===typeof a&&"undefined"!==typeof window&&window.postMessage&&window.addEventListener&&!E("Presto")&&(a=function(){var a=document.createElement("IFRAME");a.style.display="none";a.src="";document.documentElement.appendChild(a);var b=a.contentWindow,a=b.document;a.open();a.write("");a.close();var c="callImmediate"+Math.random(),d="file:"==b.location.protocol?"*":b.location.protocol+"//"+b.location.host,
+a=t(function(a){if(("*"==d||a.origin==d)&&a.data==c)this.port1.onmessage()},this);b.addEventListener("message",a,!1);this.port1={};this.port2={postMessage:function(){b.postMessage(c,d)}}});if("undefined"!==typeof a&&!E("Trident")&&!E("MSIE")){var b=new a,c={},d=c;b.port1.onmessage=function(){if(n(c.next)){c=c.next;var a=c.ea;c.ea=null;a()}};return function(a){d.next={ea:a};d=d.next;b.port2.postMessage(0)}}return"undefined"!==typeof document&&"onreadystatechange"in document.createElement("SCRIPT")?
+function(a){var b=document.createElement("SCRIPT");b.onreadystatechange=function(){b.onreadystatechange=null;b.parentNode.removeChild(b);b=null;a();a=null};document.documentElement.appendChild(b)}:function(a){m.setTimeout(a,0)}};var Lb="StopIteration"in m?m.StopIteration:{message:"StopIteration",stack:""},Mb=function(){};Mb.prototype.next=function(){throw Lb;};Mb.prototype.Y=function(){return this};var Nb=function(){Cb.call(this)};u(Nb,Cb);var Ob=E("Opera"),F=E("Trident")||E("MSIE"),Pb=E("Edge"),Qb=E("Gecko")&&!(-1!=Wa.toLowerCase().indexOf("webkit")&&!E("Edge"))&&!(E("Trident")||E("MSIE"))&&!E("Edge"),Rb=-1!=Wa.toLowerCase().indexOf("webkit")&&!E("Edge"),Sb=function(){var a=m.document;return a?a.documentMode:void 0},Ub;
+a:{var Vb="",Wb=function(){var a=Wa;if(Qb)return/rv\:([^\);]+)(\)|;)/.exec(a);if(Pb)return/Edge\/([\d\.]+)/.exec(a);if(F)return/\b(?:MSIE|rv)[: ]([^\);]+)(\)|;)/.exec(a);if(Rb)return/WebKit\/(\S+)/.exec(a);if(Ob)return/(?:Version)[ \/]?(\S+)/.exec(a)}();Wb&&(Vb=Wb?Wb[1]:"");if(F){var Xb=Sb();if(null!=Xb&&Xb>parseFloat(Vb)){Ub=String(Xb);break a}}Ub=Vb}
+var Yb=Ub,Zb={},G=function(a){var b;if(!(b=Zb[a])){b=0;for(var c=Ia(String(Yb)).split("."),d=Ia(String(a)).split("."),e=Math.max(c.length,d.length),f=0;0==b&&f<e;f++){var g=c[f]||"",h=d[f]||"",l=/(\d*)(\D*)/g,B=/(\d*)(\D*)/g;do{var w=l.exec(g)||["","",""],N=B.exec(h)||["","",""];if(0==w[0].length&&0==N[0].length)break;b=Ja(0==w[1].length?0:parseInt(w[1],10),0==N[1].length?0:parseInt(N[1],10))||Ja(0==w[2].length,0==N[2].length)||Ja(w[2],N[2])}while(0==b)}b=Zb[a]=0<=b}return b},$b=m.document,ac=$b&&
+F?Sb()||("CSS1Compat"==$b.compatMode?parseInt(Yb,10):5):void 0;var ec=function(a,b){bc||cc();dc||(bc(),dc=!0);var c=nb,d=mb.get();d.set(a,b);c.b?c.b.next=d:(C(!c.a),c.a=d);c.b=d},bc,cc=function(){if(m.Promise&&m.Promise.resolve){var a=m.Promise.resolve(void 0);bc=function(){a.then(fc)}}else bc=function(){var a=fc;!r(m.setImmediate)||m.Window&&m.Window.prototype&&!E("Edge")&&m.Window.prototype.setImmediate==m.setImmediate?(Jb||(Jb=Kb()),Jb(a)):m.setImmediate(a)}},dc=!1,nb=new function(){this.b=this.a=null},fc=function(){for(var a;a=ob();){try{a.a.call(a.b)}catch(b){Ib(b)}wa(mb,
+a)}dc=!1};var gc;(gc=!F)||(gc=9<=Number(ac));var hc=gc,ic=F&&!G("9");!Rb||G("528");Qb&&G("1.9b")||F&&G("8")||Ob&&G("9.5")||Rb&&G("528");Qb&&!G("8")||F&&G("9");var jc=function(a,b){this.b={};this.a=[];this.f=this.c=0;var c=arguments.length;if(1<c){if(c%2)throw Error("Uneven number of arguments");for(var d=0;d<c;d+=2)this.set(arguments[d],arguments[d+1])}else if(a){a instanceof jc?(c=a.D(),d=a.w()):(c=Ba(a),d=Aa(a));for(var e=0;e<c.length;e++)this.set(c[e],d[e])}};k=jc.prototype;k.o=function(){return this.c};k.w=function(){kc(this);for(var a=[],b=0;b<this.a.length;b++)a.push(this.b[this.a[b]]);return a};k.D=function(){kc(this);return this.a.concat()};
+k.F=function(){return 0==this.c};k.clear=function(){this.b={};this.f=this.c=this.a.length=0};
+var lc=function(a,b){return Object.prototype.hasOwnProperty.call(a.b,b)?(delete a.b[b],a.c--,a.f++,a.a.length>2*a.c&&kc(a),!0):!1},kc=function(a){if(a.c!=a.a.length){for(var b=0,c=0;b<a.a.length;){var d=a.a[b];Object.prototype.hasOwnProperty.call(a.b,d)&&(a.a[c++]=d);b++}a.a.length=c}if(a.c!=a.a.length){for(var e={},c=b=0;b<a.a.length;)d=a.a[b],Object.prototype.hasOwnProperty.call(e,d)||(a.a[c++]=d,e[d]=1),b++;a.a.length=c}};k=jc.prototype;
+k.get=function(a,b){return Object.prototype.hasOwnProperty.call(this.b,a)?this.b[a]:b};k.set=function(a,b){Object.prototype.hasOwnProperty.call(this.b,a)||(this.c++,this.a.push(a),this.f++);this.b[a]=b};k.forEach=function(a,b){for(var c=this.D(),d=0;d<c.length;d++){var e=c[d],f=this.get(e);a.call(b,f,e,this)}};k.clone=function(){return new jc(this)};
+k.Y=function(a){kc(this);var b=0,c=this.f,d=this,e=new Mb;e.next=function(){if(c!=d.f)throw Error("The map has changed since the iterator was created");if(b>=d.a.length)throw Lb;var e=d.a[b++];return a?e:d.b[e]};return e};var mc=function(a,b){pb.call(this,a?a.type:"");this.c=this.a=this.target=null;if(a){this.type=a.type;this.target=a.target||a.srcElement;this.a=b;if((b=a.relatedTarget)&&Qb)try{Ga(b.nodeName)}catch(c){}this.c=a;a.defaultPrevented&&this.b()}};u(mc,pb);mc.prototype.b=function(){mc.G.b.call(this);var a=this.c;if(a.preventDefault)a.preventDefault();else if(a.returnValue=!1,ic)try{if(a.ctrlKey||112<=a.keyCode&&123>=a.keyCode)a.keyCode=-1}catch(b){}};var H=function(a,b){this.a=0;this.i=void 0;this.c=this.b=this.f=null;this.g=this.h=!1;if(a!=ba)try{var c=this;a.call(b,function(a){nc(c,2,a)},function(a){try{if(a instanceof Error)throw a;throw Error("Promise rejected.");}catch(b){}nc(c,3,a)})}catch(d){nc(this,3,d)}},oc=function(){this.next=this.f=this.c=this.a=this.b=null;this.g=!1};oc.prototype.reset=function(){this.f=this.c=this.a=this.b=null;this.g=!1};
+var pc=new va(function(){return new oc},function(a){a.reset()},100),qc=function(a,b,c){var d=pc.get();d.a=a;d.c=b;d.f=c;return d},rc=function(a){if(a instanceof H)return a;var b=new H(ba);nc(b,2,a);return b},sc=function(a){return new H(function(b,c){c(a)})};
+H.prototype.then=function(a,b,c){null!=a&&Sa(a,"opt_onFulfilled should be a function.");null!=b&&Sa(b,"opt_onRejected should be a function. Did you pass opt_context as the second argument instead of the third?");return tc(this,r(a)?a:null,r(b)?b:null,c)};Ea(H);H.prototype.l=function(a,b){return tc(this,null,a,b)};
+var vc=function(a,b){a.b||2!=a.a&&3!=a.a||uc(a);C(null!=b.a);a.c?a.c.next=b:a.b=b;a.c=b},tc=function(a,b,c,d){var e=qc(null,null,null);e.b=new H(function(a,g){e.a=b?function(c){try{var e=b.call(d,c);a(e)}catch(B){g(B)}}:a;e.c=c?function(b){try{var e=c.call(d,b);a(e)}catch(B){g(B)}}:g});e.b.f=a;vc(a,e);return e.b};H.prototype.s=function(a){C(1==this.a);this.a=0;nc(this,2,a)};H.prototype.m=function(a){C(1==this.a);this.a=0;nc(this,3,a)};
+var nc=function(a,b,c){if(0==a.a){a===c&&(b=3,c=new TypeError("Promise cannot resolve to itself"));a.a=1;var d;a:{var e=c,f=a.s,g=a.m;if(e instanceof H)null!=f&&Sa(f,"opt_onFulfilled should be a function."),null!=g&&Sa(g,"opt_onRejected should be a function. Did you pass opt_context as the second argument instead of the third?"),vc(e,qc(f||ba,g||null,a)),d=!0;else if(Fa(e))e.then(f,g,a),d=!0;else{if(da(e))try{var h=e.then;if(r(h)){wc(e,h,f,g,a);d=!0;break a}}catch(l){g.call(a,l);d=!0;break a}d=!1}}d||
+(a.i=c,a.a=b,a.f=null,uc(a),3!=b||xc(a,c))}},wc=function(a,b,c,d,e){var f=!1,g=function(a){f||(f=!0,c.call(e,a))},h=function(a){f||(f=!0,d.call(e,a))};try{b.call(a,g,h)}catch(l){h(l)}},uc=function(a){a.h||(a.h=!0,ec(a.j,a))},yc=function(a){var b=null;a.b&&(b=a.b,a.b=b.next,b.next=null);a.b||(a.c=null);null!=b&&C(null!=b.a);return b};
+H.prototype.j=function(){for(var a;a=yc(this);){var b=this.a,c=this.i;if(3==b&&a.c&&!a.g){var d;for(d=this;d&&d.g;d=d.f)d.g=!1}if(a.b)a.b.f=null,zc(a,b,c);else try{a.g?a.a.call(a.f):zc(a,b,c)}catch(e){Ac.call(null,e)}wa(pc,a)}this.h=!1};var zc=function(a,b,c){2==b?a.a.call(a.f,c):a.c&&a.c.call(a.f,c)},xc=function(a,b){a.g=!0;ec(function(){a.g&&Ac.call(null,b)})},Ac=Ib;var Cc=function(a){this.a=new jc;if(a){a=Gb(a);for(var b=a.length,c=0;c<b;c++){var d=a[c];this.a.set(Bc(d),d)}}},Bc=function(a){var b=typeof a;return"object"==b&&a||"function"==b?"o"+(a[ea]||(a[ea]=++fa)):b.substr(0,1)+a};k=Cc.prototype;k.o=function(){return this.a.o()};k.clear=function(){this.a.clear()};k.F=function(){return this.a.F()};k.w=function(){return this.a.w()};k.clone=function(){return new Cc(this)};k.Y=function(){return this.a.Y(!1)};var Dc=function(a){return function(){var b=[];Array.prototype.push.apply(b,arguments);rc(!0).then(function(){a.apply(null,b)})}};var Ec="closure_lm_"+(1E6*Math.random()|0),Fc={},Gc=0,Hc=function(a,b,c,d,e){if("array"==p(b)){for(var f=0;f<b.length;f++)Hc(a,b[f],c,d,e);return null}c=Ic(c);a&&a[Ta]?(Jc(a),a=xb(a.b,String(b),c,!1,d,e)):a=Kc(a,b,c,!1,d,e);return a},Kc=function(a,b,c,d,e,f){if(!b)throw Error("Invalid event type");var g=!!e,h=Lc(a);h||(a[Ec]=h=new vb(a));c=xb(h,b,c,d,e,f);if(c.a)return c;d=Mc();c.a=d;d.src=a;d.listener=c;if(a.addEventListener)a.addEventListener(b.toString(),d,g);else if(a.attachEvent)a.attachEvent(Nc(b.toString()),
+d);else throw Error("addEventListener and attachEvent are unavailable.");Gc++;return c},Mc=function(){var a=Oc,b=hc?function(c){return a.call(b.src,b.listener,c)}:function(c){c=a.call(b.src,b.listener,c);if(!c)return c};return b},Pc=function(a,b,c,d,e){if("array"==p(b))for(var f=0;f<b.length;f++)Pc(a,b[f],c,d,e);else c=Ic(c),a&&a[Ta]?xb(a.b,String(b),c,!0,d,e):Kc(a,b,c,!0,d,e)},Qc=function(a,b,c,d,e){if("array"==p(b))for(var f=0;f<b.length;f++)Qc(a,b[f],c,d,e);else(c=Ic(c),a&&a[Ta])?(a=a.b,b=String(b).toString(),
+b in a.a&&(f=a.a[b],c=wb(f,c,d,e),-1<c&&(rb(f[c]),C(null!=f.length),Array.prototype.splice.call(f,c,1),0==f.length&&(delete a.a[b],a.b--)))):a&&(a=Lc(a))&&(b=a.a[b.toString()],a=-1,b&&(a=wb(b,c,!!d,e)),(c=-1<a?b[a]:null)&&Rc(c))},Rc=function(a){if("number"!=typeof a&&a&&!a.O){var b=a.src;if(b&&b[Ta])yb(b.b,a);else{var c=a.type,d=a.a;b.removeEventListener?b.removeEventListener(c,d,a.U):b.detachEvent&&b.detachEvent(Nc(c),d);Gc--;(c=Lc(b))?(yb(c,a),0==c.b&&(c.src=null,b[Ec]=null)):rb(a)}}},Nc=function(a){return a in
+Fc?Fc[a]:Fc[a]="on"+a},Tc=function(a,b,c,d){var e=!0;if(a=Lc(a))if(b=a.a[b.toString()])for(b=b.concat(),a=0;a<b.length;a++){var f=b[a];f&&f.U==c&&!f.O&&(f=Sc(f,d),e=e&&!1!==f)}return e},Sc=function(a,b){var c=a.listener,d=a.N||a.src;a.T&&Rc(a);return c.call(d,b)},Oc=function(a,b){if(a.O)return!0;if(!hc){if(!b)a:{b=["window","event"];for(var c=m,d;d=b.shift();)if(null!=c[d])c=c[d];else{b=null;break a}b=c}d=b;b=new mc(d,this);c=!0;if(!(0>d.keyCode||void 0!=d.returnValue)){a:{var e=!1;if(0==d.keyCode)try{d.keyCode=
+-1;break a}catch(g){e=!0}if(e||void 0==d.returnValue)d.returnValue=!0}d=[];for(e=b.a;e;e=e.parentNode)d.push(e);a=a.type;for(e=d.length-1;0<=e;e--){b.a=d[e];var f=Tc(d[e],a,!0,b),c=c&&f}for(e=0;e<d.length;e++)b.a=d[e],f=Tc(d[e],a,!1,b),c=c&&f}return c}return Sc(a,new mc(b,this))},Lc=function(a){a=a[Ec];return a instanceof vb?a:null},Uc="__closure_events_fn_"+(1E9*Math.random()>>>0),Ic=function(a){C(a,"Listener can not be null.");if(r(a))return a;C(a.handleEvent,"An object listener must have handleEvent method.");
+a[Uc]||(a[Uc]=function(b){return a.handleEvent(b)});return a[Uc]};var I=function(a,b){D.call(this);this.l=a||0;this.c=b||10;if(this.l>this.c)throw Error("[goog.structs.Pool] Min can not be greater than max");this.a=new Eb;this.b=new Cc;this.i=null;this.S()};u(I,D);I.prototype.W=function(){var a=ia();if(!(null!=this.i&&0>a-this.i)){for(var b;0<this.a.o()&&(b=Fb(this.a),!this.j(b));)this.S();!b&&this.o()<this.c&&(b=this.h());b&&(this.i=a,this.b.a.set(Bc(b),b));return b}};var Wc=function(a){var b=Vc;lc(b.b.a,Bc(a))&&b.Z(a)};
+I.prototype.Z=function(a){lc(this.b.a,Bc(a));this.j(a)&&this.o()<this.c?this.a.a.push(a):Xc(a)};I.prototype.S=function(){for(var a=this.a;this.o()<this.l;){var b=this.h();a.a.push(b)}for(;this.o()>this.c&&0<this.a.o();)Xc(Fb(a))};I.prototype.h=function(){return{}};var Xc=function(a){if("function"==typeof a.fa)a.fa();else for(var b in a)a[b]=null};I.prototype.j=function(a){return"function"==typeof a.ra?a.ra():!0};I.prototype.o=function(){return this.a.o()+this.b.o()};
+I.prototype.F=function(){return this.a.F()&&this.b.F()};I.prototype.A=function(){I.G.A.call(this);if(0<this.b.o())throw Error("[goog.structs.Pool] Objects not released");delete this.b;for(var a=this.a;!a.F();)Xc(Fb(a));delete this.a};/*
+ Portions of this code are from MochiKit, received by
+ The Closure Authors under the MIT license. All other code is Copyright
+ 2005-2009 The Closure Authors. All Rights Reserved.
+*/
+var Yc=function(a,b){this.c=[];this.m=b||null;this.a=this.h=!1;this.b=void 0;this.j=this.g=!1;this.f=0;this.i=null;this.s=0};Yc.prototype.l=function(a,b){this.g=!1;this.h=!0;this.b=b;this.a=!a;Zc(this)};var $c=function(a,b,c){C(!a.j,"Blocking Deferreds can not be re-used");a.c.push([b,c,void 0]);a.h&&Zc(a)};Yc.prototype.then=function(a,b,c){var d,e,f=new H(function(a,b){d=a;e=b});$c(this,d,function(a){e(a)});return f.then(a,b,c)};Ea(Yc);
+var ad=function(a){return fb(a.c,function(a){return r(a[1])})},Zc=function(a){if(a.f&&a.h&&ad(a)){var b=a.f,c=bd[b];c&&(m.clearTimeout(c.a),delete bd[b]);a.f=0}a.i&&(a.i.s--,delete a.i);for(var b=a.b,d=c=!1;a.c.length&&!a.g;){var e=a.c.shift(),f=e[0],g=e[1],e=e[2];if(f=a.a?g:f)try{var h=f.call(e||a.m,b);n(h)&&(a.a=a.a&&(h==b||h instanceof Error),a.b=b=h);if(Fa(b)||"function"===typeof m.Promise&&b instanceof m.Promise)d=!0,a.g=!0}catch(l){b=l,a.a=!0,ad(a)||(c=!0)}}a.b=b;d&&(h=t(a.l,a,!0),d=t(a.l,a,
+!1),b instanceof Yc?($c(b,h,d),b.j=!0):b.then(h,d));c&&(b=new cd(b),bd[b.a]=b,a.f=b.a)},cd=function(a){this.a=m.setTimeout(t(this.c,this),0);this.b=a};cd.prototype.c=function(){C(bd[this.a],"Cannot throw an error that is not scheduled.");delete bd[this.a];throw this.b;};var bd={};var dd=function(a){this.f=a;this.b=this.c=this.a=null},ed=function(a,b){this.name=a;this.value=b};ed.prototype.toString=function(){return this.name};var fd=new ed("SEVERE",1E3),gd=new ed("CONFIG",700),hd=new ed("FINE",500),id=function(a){if(a.c)return a.c;if(a.a)return id(a.a);Ra("Root logger has no level set.");return null};
+dd.prototype.log=function(a,b,c){if(a.value>=id(this).value)for(r(b)&&(b=b()),a=new ya(a,String(b),this.f),c&&(a.a=c),c="log:"+a.b,m.console&&(m.console.timeStamp?m.console.timeStamp(c):m.console.markTimeline&&m.console.markTimeline(c)),m.msWriteProfilerMark&&m.msWriteProfilerMark(c),c=this;c;)c=c.a};
+var jd={},kd=null,ld=function(a){kd||(kd=new dd(""),jd[""]=kd,kd.c=gd);var b;if(!(b=jd[a])){b=new dd(a);var c=a.lastIndexOf("."),d=a.substr(c+1),c=ld(a.substr(0,c));c.b||(c.b={});c.b[d]=b;b.a=c;jd[a]=b}return b};var J=function(){D.call(this);this.b=new vb(this);this.ma=this;this.I=null};u(J,D);J.prototype[Ta]=!0;J.prototype.removeEventListener=function(a,b,c,d){Qc(this,a,b,c,d)};
+var K=function(a,b){Jc(a);var c,d=a.I;if(d){c=[];for(var e=1;d;d=d.I)c.push(d),C(1E3>++e,"infinite loop")}a=a.ma;d=b.type||b;q(b)?b=new pb(b,a):b instanceof pb?b.target=b.target||a:(e=b,b=new pb(d,a),Da(b,e));var e=!0,f;if(c)for(var g=c.length-1;0<=g;g--)f=b.a=c[g],e=md(f,d,!0,b)&&e;f=b.a=a;e=md(f,d,!0,b)&&e;e=md(f,d,!1,b)&&e;if(c)for(g=0;g<c.length;g++)f=b.a=c[g],e=md(f,d,!1,b)&&e};
+J.prototype.A=function(){J.G.A.call(this);if(this.b){var a=this.b,b=0,c;for(c in a.a){for(var d=a.a[c],e=0;e<d.length;e++)++b,rb(d[e]);delete a.a[c];a.b--}}this.I=null};var md=function(a,b,c,d){b=a.b.a[String(b)];if(!b)return!0;b=b.concat();for(var e=!0,f=0;f<b.length;++f){var g=b[f];if(g&&!g.O&&g.U==c){var h=g.listener,l=g.N||g.src;g.T&&yb(a.b,g);e=!1!==h.call(l,d)&&e}}return e&&0!=d.ka},Jc=function(a){C(a.b,"Event target is not initialized. Did you call the superclass (goog.events.EventTarget) constructor?")};var L=function(a,b){this.f=new Nb;I.call(this,a,b)};u(L,I);k=L.prototype;k.W=function(a,b){if(!a)return L.G.W.call(this);Db(this.f,n(b)?b:100,a);this.$()};k.$=function(){for(var a=this.f;0<a.o();){var b=this.W();if(b){var c;var d=a,e=d.a,f=e.length;c=e[0];if(0>=f)c=void 0;else{if(1==f)ib(e);else{e[0]=e.pop();for(var e=0,d=d.a,f=d.length,g=d[e];e<f>>1;){var h=2*e+1,l=2*e+2,h=l<f&&d[l].a<d[h].a?l:h;if(d[h].a>g.a)break;d[e]=d[h];e=h}d[e]=g}c=c.b}c.apply(this,[b])}else break}};
+k.Z=function(a){L.G.Z.call(this,a);this.$()};k.S=function(){L.G.S.call(this);this.$()};k.A=function(){L.G.A.call(this);m.clearTimeout(void 0);this.f.clear();this.f=null};var M=function(a,b){a&&a.log(hd,b,void 0)};var nd=function(a,b,c){if(r(a))c&&(a=t(a,c));else if(a&&"function"==typeof a.handleEvent)a=t(a.handleEvent,a);else throw Error("Invalid listener argument");return 2147483647<Number(b)?-1:m.setTimeout(a,b||0)};var O=function(a){J.call(this);this.L=new jc;this.C=a||null;this.c=!1;this.B=this.a=null;this.P=this.l="";this.J=0;this.h="";this.f=this.H=this.j=this.K=!1;this.i=0;this.m=null;this.da="";this.v=this.ba=this.X=!1};u(O,J);var od=O.prototype,pd=ld("goog.net.XhrIo");od.u=pd;var qd=/^https?$/i,rd=["POST","PUT"];
+O.prototype.send=function(a,b,c,d){if(this.a)throw Error("[goog.net.XhrIo] Object is active with another request="+this.l+"; newUri="+a);b=b?b.toUpperCase():"GET";this.l=a;this.h="";this.J=0;this.P=b;this.K=!1;this.c=!0;this.a=this.C?Bb(this.C):Bb(zb);this.B=this.C?ab(this.C):ab(zb);this.a.onreadystatechange=t(this.ca,this);this.ba&&"onprogress"in this.a&&(this.a.onprogress=t(function(a){this.R(a,!0)},this),this.a.upload&&(this.a.upload.onprogress=t(this.R,this)));try{M(this.u,P(this,"Opening Xhr")),
+this.H=!0,this.a.open(b,String(a),!0),this.H=!1}catch(f){M(this.u,P(this,"Error opening Xhr: "+f.message));sd(this,f);return}a=c||"";var e=this.L.clone();d&&Hb(d,function(a,b){e.set(b,a)});d=hb(e.D());c=m.FormData&&a instanceof m.FormData;!(0<=bb(rd,b))||d||c||e.set("Content-Type","application/x-www-form-urlencoded;charset=utf-8");e.forEach(function(a,b){this.a.setRequestHeader(b,a)},this);this.da&&(this.a.responseType=this.da);"withCredentials"in this.a&&this.a.withCredentials!==this.X&&(this.a.withCredentials=
+this.X);try{td(this),0<this.i&&(this.v=ud(this.a),M(this.u,P(this,"Will abort after "+this.i+"ms if incomplete, xhr2 "+this.v)),this.v?(this.a.timeout=this.i,this.a.ontimeout=t(this.M,this)):this.m=nd(this.M,this.i,this)),M(this.u,P(this,"Sending request")),this.j=!0,this.a.send(a),this.j=!1}catch(f){M(this.u,P(this,"Send error: "+f.message)),sd(this,f)}};var ud=function(a){return F&&G(9)&&"number"==typeof a.timeout&&n(a.ontimeout)},gb=function(a){return"content-type"==a.toLowerCase()};
+O.prototype.M=function(){"undefined"!=typeof aa&&this.a&&(this.h="Timed out after "+this.i+"ms, aborting",this.J=8,M(this.u,P(this,this.h)),K(this,"timeout"),vd(this,8))};var sd=function(a,b){a.c=!1;a.a&&(a.f=!0,a.a.abort(),a.f=!1);a.h=b;a.J=5;wd(a);xd(a)},wd=function(a){a.K||(a.K=!0,K(a,"complete"),K(a,"error"))},vd=function(a,b){a.a&&a.c&&(M(a.u,P(a,"Aborting")),a.c=!1,a.f=!0,a.a.abort(),a.f=!1,a.J=b||7,K(a,"complete"),K(a,"abort"),xd(a))};
+O.prototype.A=function(){this.a&&(this.c&&(this.c=!1,this.f=!0,this.a.abort(),this.f=!1),xd(this,!0));O.G.A.call(this)};O.prototype.ca=function(){this.g||(this.H||this.j||this.f?yd(this):this.na())};O.prototype.na=function(){yd(this)};
+var yd=function(a){if(a.c&&"undefined"!=typeof aa)if(a.B[1]&&4==zd(a)&&2==Q(a))M(a.u,P(a,"Local request error detected and ignored"));else if(a.j&&4==zd(a))nd(a.ca,0,a);else if(K(a,"readystatechange"),4==zd(a)){M(a.u,P(a,"Request complete"));a.c=!1;try{if(Bd(a))K(a,"complete"),K(a,"success");else{a.J=6;var b;try{b=2<zd(a)?a.a.statusText:""}catch(c){M(a.u,"Can not get status: "+c.message),b=""}a.h=b+" ["+Q(a)+"]";wd(a)}}finally{xd(a)}}};
+O.prototype.R=function(a,b){C("progress"===a.type,"goog.net.EventType.PROGRESS is of the same type as raw XHR progress.");K(this,Cd(a,"progress"));K(this,Cd(a,b?"downloadprogress":"uploadprogress"))};
+var Cd=function(a,b){return{type:b,lengthComputable:a.lengthComputable,loaded:a.loaded,total:a.total}},xd=function(a,b){if(a.a){td(a);var c=a.a,d=a.B[0]?ba:null;a.a=null;a.B=null;b||K(a,"ready");try{c.onreadystatechange=d}catch(e){(a=a.u)&&a.log(fd,"Problem encountered resetting onreadystatechange: "+e.message,void 0)}}},td=function(a){a.a&&a.v&&(a.a.ontimeout=null);"number"==typeof a.m&&(m.clearTimeout(a.m),a.m=null)},Bd=function(a){var b=Q(a),c;a:switch(b){case 200:case 201:case 202:case 204:case 206:case 304:case 1223:c=
+!0;break a;default:c=!1}if(!c){if(b=0===b)a=String(a.l).match(sb)[1]||null,!a&&m.self&&m.self.location&&(a=m.self.location.protocol,a=a.substr(0,a.length-1)),b=!qd.test(a?a.toLowerCase():"");c=b}return c},zd=function(a){return a.a?a.a.readyState:0},Q=function(a){try{return 2<zd(a)?a.a.status:-1}catch(b){return-1}},Dd=function(a){try{return a.a?a.a.responseText:""}catch(b){return M(a.u,"Can not get responseText: "+b.message),""}},Ed=function(a,b){return a.a&&4==zd(a)?a.a.getResponseHeader(b):void 0},
+P=function(a,b){return b+" ["+a.P+" "+a.l+" "+Q(a)+"]"};var Fd=function(a,b,c,d){this.m=a;this.v=!!d;L.call(this,b,c)};u(Fd,L);Fd.prototype.h=function(){var a=new O,b=this.m;b&&b.forEach(function(b,d){a.L.set(d,b)});this.v&&(a.X=!0);return a};Fd.prototype.j=function(a){return!a.g&&!a.a};var Vc=new Fd;var Hd=function(a,b,c,d,e,f,g,h,l,B){this.L=a;this.H=b;this.B=c;this.m=d;this.I=e.slice();this.s=this.l=this.f=this.c=null;this.h=this.i=!1;this.v=f;this.j=g;this.g=l;this.M=B;this.K=h;var w=this;this.C=new H(function(a,b){w.l=a;w.s=b;Gd(w)})},Id=function(a,b,c){this.b=a;this.c=b;this.a=!!c},Gd=function(a){function b(a,b){b?a(!1,new Id(!1,null,!0)):Vc.W(function(b){b.X=d.M;d.c=b;var c=null;null!==d.g&&(b.ba=!0,c=Hc(b,"uploadprogress",function(a){d.g(a.loaded,a.lengthComputable?a.total:-1)}),b.ba=
+null!==d.g);b.send(d.L,d.H,d.m,d.B);Pc(b,"complete",function(b){null!==c&&Rc(c);d.c=null;b=b.target;var f=6===b.J&&100<=Q(b),f=Bd(b)||f,g=Q(b);!f||500<=g&&600>g||429===g?(f=7===b.J,Wc(b),a(!1,new Id(!1,null,f))):(f=0<=bb(d.I,g),a(!0,new Id(f,b)))})})}function c(a,b){var c=d.l;a=d.s;var h=b.c;if(b.b)try{var l=d.v(h,Dd(h));n(l)?c(l):c()}catch(B){a(B)}else null!==h?(b=la(),l=Dd(h),b.serverResponse=l,d.j?a(d.j(h,b)):a(b)):(b=b.a?d.h?oa():ma():new v("retry-limit-exceeded","Max retry time for operation exceeded, please try again."),
+a(b));Wc(h)}var d=a;a.i?c(0,new Id(!1,null,!0)):a.f=ja(b,c,a.K)};Hd.prototype.a=function(){return this.C};Hd.prototype.b=function(a){this.i=!0;this.h=a||!1;null!==this.f&&(0,this.f)(!1);null!==this.c&&vd(this.c)};var Jd=function(a,b,c){var d=Oa(a.f),d=a.l+d,e=a.b?qa(a.b):{};null!==b&&0<b.length&&(e.Authorization="Firebase "+b);e["X-Firebase-Storage-Version"]="webjs/1.0.0";return new Hd(d,a.i,e,a.c,a.h,a.N,a.a,a.j,a.g,c)};var Kd=function(a){var b=m.BlobBuilder||m.WebKitBlobBuilder;if(n(b)){for(var b=new b,c=0;c<arguments.length;c++)b.append(arguments[c]);return b.getBlob()}b=kb(arguments);c=m.BlobBuilder||m.WebKitBlobBuilder;if(n(c)){for(var c=new c,d=0;d<b.length;d++)c.append(b[d],void 0);b=c.getBlob(void 0)}else if(n(m.Blob))b=new Blob(b,{});else throw Error("This browser doesn't seem to support creating Blobs");return b},Ld=function(a,b,c){n(c)||(c=a.size);return a.webkitSlice?a.webkitSlice(b,c):a.mozSlice?a.mozSlice(b,
+c):a.slice?Qb&&!G("13.0")||Rb&&!G("537.1")?(0>b&&(b+=a.size),0>b&&(b=0),0>c&&(c+=a.size),c<b&&(c=b),a.slice(b,c-b)):a.slice(b,c):null};var Md=function(a){this.c=sc(a)};Md.prototype.a=function(){return this.c};Md.prototype.b=function(){};var Nd=function(){this.a={};this.b=Number.MIN_SAFE_INTEGER},Od=function(a,b){function c(){delete e.a[d]}var d=a.b;a.b++;a.a[d]=b;var e=a;b.a().then(c,c)};Nd.prototype.clear=function(){pa(this.a,function(a,b){b&&b.b(!0)});this.a={}};var Pd=function(a,b,c,d){this.a=a;this.g=null;if(null!==this.a&&(a=this.a.options,y(a))){a=a.storageBucket||null;if(null==a)a=null;else{var e=null;try{e=Ma(a)}catch(f){}if(null!==e){if(""!==e.path)throw new v("invalid-default-bucket","Invalid default bucket '"+a+"'.");a=e.bucket}}this.g=a}this.l=b;this.j=c;this.i=d;this.c=12E4;this.b=6E4;this.h=new Nd;this.f=!1},Qd=function(a){return null!==a.a&&y(a.a.INTERNAL)&&y(a.a.INTERNAL.getToken)?a.a.INTERNAL.getToken().then(function(a){return y(a)?a.accessToken:
+null},function(){return null}):rc(null)};Pd.prototype.bucket=function(){if(this.f)throw oa();return this.g};var R=function(a,b,c){if(a.f)return new Md(oa());b=a.j(b,c,null===a.a);Od(a.h,b);return b};var Rd=function(a,b){return b},S=function(a,b,c,d){this.c=a;this.b=b||a;this.f=!!c;this.a=d||Rd},Sd=null,Td=function(){if(Sd)return Sd;var a=[];a.push(new S("bucket"));a.push(new S("generation"));a.push(new S("metageneration"));a.push(new S("name","fullPath",!0));var b=new S("name");b.a=function(a,b){return!ua(b)||2>b.length?b:ub(b)};a.push(b);b=new S("size");b.a=function(a,b){return y(b)?+b:b};a.push(b);a.push(new S("timeCreated"));a.push(new S("updated"));a.push(new S("md5Hash",null,!0));a.push(new S("cacheControl",
+null,!0));a.push(new S("contentDisposition",null,!0));a.push(new S("contentEncoding",null,!0));a.push(new S("contentLanguage",null,!0));a.push(new S("contentType",null,!0));a.push(new S("metadata","customMetadata",!0));a.push(new S("downloadTokens","downloadURLs",!1,function(a,b){if(!(ua(b)&&0<b.length))return[];var e=encodeURIComponent;return eb(b.split(","),function(b){var d=a.fullPath,d="https://firebasestorage.googleapis.com/v0"+("/b/"+e(a.bucket)+"/o/"+e(d));b=Oa({alt:"media",token:b});return d+
+b})}));return Sd=a},Ud=function(a,b){Object.defineProperty(a,"ref",{get:function(){return b.l(b,new z(a.bucket,a.fullPath))}})},Vd=function(a,b){for(var c={},d=b.length,e=0;e<d;e++){var f=b[e];f.f&&(c[f.c]=a[f.b])}return JSON.stringify(c)},Wd=function(a){if(!a||"object"!==typeof a)throw"Expected Metadata object.";for(var b in a){var c=a[b];if("customMetadata"===b&&"object"!==typeof c)throw"Expected object for 'customMetadata' mapping.";}};var T=function(a,b,c){for(var d=b.length,e=b.length,f=0;f<b.length;f++)if(b[f].b){d=f;break}if(!(d<=c.length&&c.length<=e))throw d===e?(b=d,d=1===d?"argument":"arguments"):(b="between "+d+" and "+e,d="arguments"),new v("invalid-argument-count","Invalid argument count in `"+a+"`: Expected "+b+" "+d+", received "+c.length+".");for(f=0;f<c.length;f++)try{b[f].a(c[f])}catch(g){if(g instanceof Error)throw na(f,a,g.message);throw na(f,a,g);}},U=function(a,b){var c=this;this.a=function(b){c.b&&!n(b)||a(b)};
+this.b=!!b},Xd=function(a,b){return function(c){a(c);b(c)}},Yd=function(a,b){function c(a){if(!("string"===typeof a||a instanceof String))throw"Expected string.";}var d;a?d=Xd(c,a):d=c;return new U(d,b)},Zd=function(){return new U(function(a){if(!(a instanceof Blob))throw"Expected Blob or File.";})},$d=function(){return new U(function(a){if(!(("number"===typeof a||a instanceof Number)&&0<=a))throw"Expected a number 0 or greater.";})},ae=function(a,b){return new U(function(b){if(!(null===b||y(b)&&
+b instanceof Object))throw"Expected an Object.";y(a)&&a(b)},b)},be=function(){return new U(function(a){if(null!==a&&!r(a))throw"Expected a Function.";},!0)};var ce=function(a){if(!a)throw la();},de=function(a,b){return function(c,d){a:{var e;try{e=JSON.parse(d)}catch(h){c=null;break a}c=da(e)?e:null}if(null===c)c=null;else{d={type:"file"};e=b.length;for(var f=0;f<e;f++){var g=b[f];d[g.b]=g.a(d,c[g.c])}Ud(d,a);c=d}ce(null!==c);return c}},ee=function(a){return function(b,c){b=401===Q(b)?new v("unauthenticated","User is not authenticated, please authenticate using Firebase Authentication and try again."):402===Q(b)?new v("quota-exceeded","Quota for bucket '"+
+a.bucket+"' exceeded, please view quota on https://firebase.google.com/pricing/."):403===Q(b)?new v("unauthorized","User does not have permission to access '"+a.path+"'."):c;b.serverResponse=c.serverResponse;return b}},fe=function(a){var b=ee(a);return function(c,d){var e=b(c,d);404===Q(c)&&(e=new v("object-not-found","Object '"+a.path+"' does not exist."));e.serverResponse=d.serverResponse;return e}},ge=function(a,b,c){var d=La(b);a=new x(ka+"/v0"+d,"GET",de(a,c),a.c);a.a=fe(b);return a},he=function(a,
+b){var c=La(b);a=new x(ka+"/v0"+c,"DELETE",function(){},a.c);a.h=[200,204];a.a=fe(b);return a},ie=function(a,b,c){c=c?qa(c):{};c.fullPath=a.path;c.size=b.size;c.contentType||(c.contentType=b&&b.type||"application/octet-stream");return c},je=function(a,b,c,d,e){var f="/b/"+encodeURIComponent(b.bucket)+"/o",g={"X-Goog-Upload-Protocol":"multipart"},h;h="";for(var l=0;2>l;l++)h+=Math.random().toString().slice(2);g["Content-Type"]="multipart/related; boundary="+h;e=ie(b,d,e);l=Vd(e,c);d=Kd("--"+h+"\r\nContent-Type: application/json; charset=utf-8\r\n\r\n"+
+l+"\r\n--"+h+"\r\nContent-Type: "+e.contentType+"\r\n\r\n",d,"\r\n--"+h+"--");a=new x(ka+"/v0"+f,"POST",de(a,c),a.b);a.f={name:e.fullPath};a.b=g;a.c=d;a.a=ee(b);return a},ke=function(a,b,c,d){this.a=a;this.total=b;this.b=!!c;this.c=d||null},le=function(a,b){var c;try{c=Ed(a,"X-Goog-Upload-Status")}catch(d){ce(!1)}a=0<=bb(b||["active"],c);ce(a);return c},me=function(a,b,c,d,e){var f="/b/"+encodeURIComponent(b.bucket)+"/o",g=ie(b,d,e);e={name:g.fullPath};f=ka+"/v0"+f;d={"X-Goog-Upload-Protocol":"resumable",
+"X-Goog-Upload-Command":"start","X-Goog-Upload-Header-Content-Length":d.size,"X-Goog-Upload-Header-Content-Type":g.contentType,"Content-Type":"application/json; charset=utf-8"};c=Vd(g,c);a=new x(f,"POST",function(a){le(a);var b;try{b=Ed(a,"X-Goog-Upload-URL")}catch(c){ce(!1)}ce(ua(b));return b},a.b);a.f=e;a.b=d;a.c=c;a.a=ee(b);return a},ne=function(a,b,c,d){a=new x(c,"POST",function(a){var b=le(a,["active","final"]),c;try{c=Ed(a,"X-Goog-Upload-Size-Received")}catch(h){ce(!1)}a=c;isFinite(a)&&(a=String(a));
+a=q(a)?/^\s*-?0x/i.test(a)?parseInt(a,16):parseInt(a,10):NaN;ce(!isNaN(a));return new ke(a,d.size,"final"===b)},a.b);a.b={"X-Goog-Upload-Command":"query"};a.a=ee(b);return a},oe=function(a,b,c,d,e,f){var g=new ke(0,0);f?(g.a=f.a,g.total=f.total):(g.a=0,g.total=d.size);if(d.size!==g.total)throw new v("server-file-wrong-size","Server recorded incorrect upload file size, please retry the upload.");var h=f=g.total-g.a,h=Math.min(h,262144),l=g.a;f={"X-Goog-Upload-Command":h===f?"upload, finalize":"upload",
+"X-Goog-Upload-Offset":g.a};l=Ld(d,l,l+h);if(null===l)throw new v("cannot-slice-blob","Cannot slice blob for upload. Please retry the upload.");c=new x(c,"POST",function(a,c){var f=le(a,["active","final"]),l=g.a+h,Ad=d.size,Va;"final"===f?Va=de(b,e)(a,c):Va=null;return new ke(l,Ad,"final"===f,Va)},b.b);c.b=f;c.c=l;c.g=null;c.a=ee(a);return c};var W=function(a,b,c,d,e,f){this.K=a;this.c=b;this.i=c;this.f=e;this.h=f||null;this.l=d;this.j=0;this.B=this.s=!1;this.v=[];this.R=262144<this.f.size;this.b="running";this.a=this.m=this.g=null;var g=this;this.V=function(a){g.a=null;"storage/canceled"===a.code?(g.s=!0,pe(g)):(g.g=a,V(g,"error"))};this.P=function(a){g.a=null;"storage/canceled"===a.code?pe(g):(g.g=a,V(g,"error"))};qe(this)},qe=function(a){"running"===a.b&&null===a.a&&(a.R?null===a.m?re(a):a.s?se(a):a.B?te(a):ue(a):ve(a))},we=function(a,
+b){Qd(a.c).then(function(c){switch(a.b){case "running":b(c);break;case "canceling":V(a,"canceled");break;case "pausing":V(a,"paused")}})},re=function(a){we(a,function(b){var c=me(a.c,a.i,a.l,a.f,a.h);a.a=R(a.c,c,b);a.a.a().then(function(b){a.a=null;a.m=b;a.s=!1;pe(a)},this.V)})},se=function(a){var b=a.m;we(a,function(c){var d=ne(a.c,a.i,b,a.f);a.a=R(a.c,d,c);a.a.a().then(function(b){a.a=null;xe(a,b.a);a.s=!1;b.b&&(a.B=!0);pe(a)},a.V)})},ue=function(a){var b=new ke(a.j,a.f.size),c=a.m;we(a,function(d){var e;
+try{e=oe(a.i,a.c,c,a.f,a.l,b)}catch(f){a.g=f;V(a,"error");return}a.a=R(a.c,e,d);a.a.a().then(function(b){a.a=null;xe(a,b.a);b.b?(a.h=b.c,V(a,"success")):pe(a)},a.V)})},te=function(a){we(a,function(b){var c=ge(a.c,a.i,a.l);a.a=R(a.c,c,b);a.a.a().then(function(b){a.a=null;a.h=b;V(a,"success")},a.P)})},ve=function(a){we(a,function(b){var c=je(a.c,a.i,a.l,a.f,a.h);a.a=R(a.c,c,b);a.a.a().then(function(b){a.a=null;a.h=b;xe(a,a.f.size);V(a,"success")},a.V)})},xe=function(a,b){var c=a.j;a.j=b;a.j>c&&ye(a)},
+V=function(a,b){if(a.b!==b)switch(b){case "canceling":a.b=b;null!==a.a&&a.a.b();break;case "pausing":a.b=b;null!==a.a&&a.a.b();break;case "running":var c="paused"===a.b;a.b=b;c&&(ye(a),qe(a));break;case "paused":a.b=b;ye(a);break;case "canceled":a.g=ma();a.b=b;ye(a);break;case "error":a.b=b;ye(a);break;case "success":a.b=b,ye(a)}},pe=function(a){switch(a.b){case "pausing":V(a,"paused");break;case "canceling":V(a,"canceled");break;case "running":qe(a)}};
+W.prototype.C=function(){return new A(this.j,this.f.size,ta(this.b),this.h,this,this.K)};
+W.prototype.I=function(a,b,c,d){function e(a){try{g(a);return}catch(b){}try{if(h(a),!(n(a.next)||n(a.error)||n(a.complete)))throw"";}catch(b){throw"Expected a function or an Object with one of `next`, `error`, `complete` properties.";}}function f(a){return function(b,c,d){null!==a&&T("on",a,arguments);var e=new Na(b,c,d);ze(l,e);return function(){jb(l.v,e)}}}var g=be().a,h=ae(null,!0).a;T("on",[Yd(function(){if("state_changed"!==a)throw"Expected one of the event types: [state_changed].";}),ae(e,!0),
+be(),be()],arguments);var l=this,B=[ae(function(a){if(null===a)throw"Expected a function or an Object with one of `next`, `error`, `complete` properties.";e(a)}),be(),be()];return n(b)||n(c)||n(d)?f(null)(b,c,d):f(B)};
+var ze=function(a,b){a.v.push(b);Ae(a,b)},ye=function(a){var b=kb(a.v);cb(b,function(b){Ae(a,b)})},Ae=function(a,b){switch(ta(a.b)){case "running":case "paused":null!==b.next&&Dc(b.next.bind(b,a.C()))();break;case "success":null!==b.a&&Dc(b.a.bind(b))();break;case "canceled":case "error":null!==b.error&&Dc(b.error.bind(b,a.g))();break;default:null!==b.error&&Dc(b.error.bind(b,a.g))()}};
+W.prototype.M=function(){T("resume",[],arguments);var a="paused"===this.b||"pausing"===this.b;a&&V(this,"running");return a};W.prototype.L=function(){T("pause",[],arguments);var a="running"===this.b;a&&V(this,"pausing");return a};W.prototype.H=function(){T("cancel",[],arguments);var a="running"===this.b||"pausing"===this.b;a&&V(this,"canceling");return a};var X=function(a,b){this.b=a;if(b)this.a=b instanceof z?b:Ma(b);else if(a=a.bucket(),null!==a)this.a=new z(a,"");else throw new v("no-default-bucket","No default bucket found. Did you set the 'storageBucket' property when initializing the app?");};X.prototype.toString=function(){T("toString",[],arguments);return"gs://"+this.a.bucket+"/"+this.a.path};var Be=function(a,b){return new X(a,b)};k=X.prototype;
+k.ga=function(a){T("child",[Yd()],arguments);var b=tb(this.a.path,a);return Be(this.b,new z(this.a.bucket,b))};k.Fa=function(){var a;a=this.a.path;if(0==a.length)a=null;else{var b=a.lastIndexOf("/");a=-1===b?"":a.slice(0,b)}return null===a?null:Be(this.b,new z(this.a.bucket,a))};k.Ha=function(){return Be(this.b,new z(this.a.bucket,""))};k.pa=function(){return this.a.bucket};k.Aa=function(){return this.a.path};k.Ea=function(){return ub(this.a.path)};k.Ja=function(){return this.b.i};
+k.ua=function(a,b){T("put",[Zd(),new U(Wd,!0)],arguments);Ce(this,"put");return new W(this,this.b,this.a,Td(),a,b)};k.delete=function(){T("delete",[],arguments);Ce(this,"delete");var a=this;return Qd(this.b).then(function(b){var c=he(a.b,a.a);return R(a.b,c,b).a()})};k.ha=function(){T("getMetadata",[],arguments);Ce(this,"getMetadata");var a=this;return Qd(this.b).then(function(b){var c=ge(a.b,a.a,Td());return R(a.b,c,b).a()})};
+k.va=function(a){T("updateMetadata",[new U(Wd,void 0)],arguments);Ce(this,"updateMetadata");var b=this;return Qd(this.b).then(function(c){var d=b.b,e=b.a,f=a,g=Td(),h=La(e),h=ka+"/v0"+h,f=Vd(f,g),d=new x(h,"PATCH",de(d,g),d.c);d.b={"Content-Type":"application/json; charset=utf-8"};d.c=f;d.a=fe(e);return R(b.b,d,c).a()})};
+k.ta=function(){T("getDownloadURL",[],arguments);Ce(this,"getDownloadURL");return this.ha().then(function(a){a=a.downloadURLs[0];if(y(a))return a;throw new v("no-download-url","The given file does not have any download URLs.");})};var Ce=function(a,b){if(""===a.a.path)throw new v("invalid-root-operation","The operation '"+b+"' cannot be performed on a root reference, create a non-root reference using child, such as .child('file.png').");};var Y=function(a){this.a=new Pd(a,function(a,c){return new X(a,c)},Jd,this);this.b=a;this.c=new De(this)};k=Y.prototype;k.wa=function(a){T("ref",[Yd(function(a){if(/^[A-Za-z]+:\/\//.test(a))throw"Expected child path but got a URL, use refFromURL instead.";},!0)],arguments);var b=new X(this.a);return n(a)?b.ga(a):b};
+k.xa=function(a){T("refFromURL",[Yd(function(a){if(!/^[A-Za-z]+:\/\//.test(a))throw"Expected full URL but got a child path, use ref instead.";try{Ma(a)}catch(c){throw"Expected valid full URL but got an invalid one.";}},!1)],arguments);return new X(this.a,a)};k.Ca=function(){return this.a.b};k.za=function(a){T("setMaxUploadRetryTime",[$d()],arguments);this.a.b=a};k.Ba=function(){return this.a.c};k.ya=function(a){T("setMaxOperationRetryTime",[$d()],arguments);this.a.c=a};k.oa=function(){return this.b};
+k.la=function(){return this.c};var De=function(a){this.a=a};De.prototype.delete=function(){var a=this.a.a;a.f=!0;a.a=null;a.h.clear()};var Z=function(a,b,c){Object.defineProperty(a,b,{get:c})};X.prototype.toString=X.prototype.toString;X.prototype.child=X.prototype.ga;X.prototype.put=X.prototype.ua;X.prototype["delete"]=X.prototype.delete;X.prototype.getMetadata=X.prototype.ha;X.prototype.updateMetadata=X.prototype.va;X.prototype.getDownloadURL=X.prototype.ta;Z(X.prototype,"parent",X.prototype.Fa);Z(X.prototype,"root",X.prototype.Ha);Z(X.prototype,"bucket",X.prototype.pa);Z(X.prototype,"fullPath",X.prototype.Aa);
+Z(X.prototype,"name",X.prototype.Ea);Z(X.prototype,"storage",X.prototype.Ja);Y.prototype.ref=Y.prototype.wa;Y.prototype.refFromURL=Y.prototype.xa;Z(Y.prototype,"maxOperationRetryTime",Y.prototype.Ba);Y.prototype.setMaxOperationRetryTime=Y.prototype.ya;Z(Y.prototype,"maxUploadRetryTime",Y.prototype.Ca);Y.prototype.setMaxUploadRetryTime=Y.prototype.za;Z(Y.prototype,"app",Y.prototype.oa);Z(Y.prototype,"INTERNAL",Y.prototype.la);De.prototype["delete"]=De.prototype.delete;
+Y.prototype.capi_=function(a){ka=a};W.prototype.on=W.prototype.I;W.prototype.resume=W.prototype.M;W.prototype.pause=W.prototype.L;W.prototype.cancel=W.prototype.H;Z(W.prototype,"snapshot",W.prototype.C);Z(A.prototype,"bytesTransferred",A.prototype.qa);Z(A.prototype,"totalBytes",A.prototype.La);Z(A.prototype,"state",A.prototype.Ia);Z(A.prototype,"metadata",A.prototype.Da);Z(A.prototype,"downloadURL",A.prototype.sa);Z(A.prototype,"task",A.prototype.Ka);Z(A.prototype,"ref",A.prototype.Ga);
+ra.STATE_CHANGED="state_changed";sa.RUNNING="running";sa.PAUSED="paused";sa.SUCCESS="success";sa.CANCELED="canceled";sa.ERROR="error";H.prototype["catch"]=H.prototype.l;H.prototype.then=H.prototype.then;
+(function(){function a(a){return new Y(a)}var b={TaskState:sa,TaskEvent:ra,Storage:Y,Reference:X};if(window.firebase&&firebase.INTERNAL&&firebase.INTERNAL.registerService)firebase.INTERNAL.registerService("storage",a,b);else throw Error("Cannot install Firebase Storage - be sure to load firebase-app.js first.");})();})();
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],9:[function(require,module,exports){
 'use strict'
 
 exports.toByteArray = toByteArray
@@ -31766,7 +34633,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],6:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 (function (Buffer){
 var DuplexStream = require('readable-stream/duplex')
   , util         = require('util')
@@ -31991,10 +34858,10 @@ BufferList.prototype.destroy = function () {
 module.exports = BufferList
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":13,"readable-stream/duplex":7,"util":85}],7:[function(require,module,exports){
+},{"buffer":17,"readable-stream/duplex":11,"util":91}],11:[function(require,module,exports){
 module.exports = require("./lib/_stream_duplex.js")
 
-},{"./lib/_stream_duplex.js":8}],8:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":12}],12:[function(require,module,exports){
 (function (process){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -32087,7 +34954,7 @@ function forEach (xs, f) {
 }
 
 }).call(this,require('_process'))
-},{"./_stream_readable":9,"./_stream_writable":10,"_process":55,"core-util-is":15,"inherits":28}],9:[function(require,module,exports){
+},{"./_stream_readable":13,"./_stream_writable":14,"_process":61,"core-util-is":20,"inherits":33}],13:[function(require,module,exports){
 (function (process){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -33073,7 +35940,7 @@ function indexOf (xs, x) {
 }
 
 }).call(this,require('_process'))
-},{"_process":55,"buffer":13,"core-util-is":15,"events":26,"inherits":28,"isarray":30,"stream":61,"string_decoder/":73}],10:[function(require,module,exports){
+},{"_process":61,"buffer":17,"core-util-is":20,"events":31,"inherits":33,"isarray":35,"stream":67,"string_decoder/":79}],14:[function(require,module,exports){
 (function (process){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -33463,9 +36330,9 @@ function endWritable(stream, state, cb) {
 }
 
 }).call(this,require('_process'))
-},{"./_stream_duplex":8,"_process":55,"buffer":13,"core-util-is":15,"inherits":28,"stream":61}],11:[function(require,module,exports){
+},{"./_stream_duplex":12,"_process":61,"buffer":17,"core-util-is":20,"inherits":33,"stream":67}],15:[function(require,module,exports){
 
-},{}],12:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 (function (global){
 'use strict';
 
@@ -33577,7 +36444,7 @@ exports.allocUnsafeSlow = function allocUnsafeSlow(size) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"buffer":13}],13:[function(require,module,exports){
+},{"buffer":17}],17:[function(require,module,exports){
 (function (global){
 /*!
  * The buffer module from node.js, for the browser.
@@ -35292,14 +38159,171 @@ function isnan (val) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"base64-js":5,"ieee754":27,"isarray":14}],14:[function(require,module,exports){
+},{"base64-js":9,"ieee754":32,"isarray":18}],18:[function(require,module,exports){
 var toString = {}.toString;
 
 module.exports = Array.isArray || function (arr) {
   return toString.call(arr) == '[object Array]';
 };
 
-},{}],15:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
+(function() {var h,aa=this;function n(a){return void 0!==a}function ba(){}function ca(a){a.rb=function(){return a.ld?a.ld:a.ld=new a}}
+function da(a){var b=typeof a;if("object"==b)if(a){if(a instanceof Array)return"array";if(a instanceof Object)return b;var c=Object.prototype.toString.call(a);if("[object Window]"==c)return"object";if("[object Array]"==c||"number"==typeof a.length&&"undefined"!=typeof a.splice&&"undefined"!=typeof a.propertyIsEnumerable&&!a.propertyIsEnumerable("splice"))return"array";if("[object Function]"==c||"undefined"!=typeof a.call&&"undefined"!=typeof a.propertyIsEnumerable&&!a.propertyIsEnumerable("call"))return"function"}else return"null";
+else if("function"==b&&"undefined"==typeof a.call)return"object";return b}function ea(a){var b=da(a);return"array"==b||"object"==b&&"number"==typeof a.length}function q(a){return"string"==typeof a}function fa(a){return"number"==typeof a}function ga(a){var b=typeof a;return"object"==b&&null!=a||"function"==b}function ha(a,b,c){return a.call.apply(a.bind,arguments)}
+function ia(a,b,c){if(!a)throw Error();if(2<arguments.length){var d=Array.prototype.slice.call(arguments,2);return function(){var c=Array.prototype.slice.call(arguments);Array.prototype.unshift.apply(c,d);return a.apply(b,c)}}return function(){return a.apply(b,arguments)}}function r(a,b,c){r=Function.prototype.bind&&-1!=Function.prototype.bind.toString().indexOf("native code")?ha:ia;return r.apply(null,arguments)}
+function ja(a,b){function c(){}c.prototype=b.prototype;a.ke=b.prototype;a.prototype=new c;a.ie=function(a,c,f){return b.prototype[c].apply(a,Array.prototype.slice.call(arguments,2))}};function ka(a){a=String(a);if(/^\s*$/.test(a)?0:/^[\],:{}\s\u2028\u2029]*$/.test(a.replace(/\\["\\\/bfnrtu]/g,"@").replace(/"[^"\\\n\r\u2028\u2029\x00-\x08\x0a-\x1f]*"|true|false|null|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?/g,"]").replace(/(?:^|:|,)(?:[\s\u2028\u2029]*\[)+/g,"")))try{return eval("("+a+")")}catch(b){}throw Error("Invalid JSON string: "+a);}function la(){this.mc=void 0}
+function ma(a,b,c){switch(typeof b){case "string":na(b,c);break;case "number":c.push(isFinite(b)&&!isNaN(b)?b:"null");break;case "boolean":c.push(b);break;case "undefined":c.push("null");break;case "object":if(null==b){c.push("null");break}if("array"==da(b)){var d=b.length;c.push("[");for(var e="",f=0;f<d;f++)c.push(e),e=b[f],ma(a,a.mc?a.mc.call(b,String(f),e):e,c),e=",";c.push("]");break}c.push("{");d="";for(f in b)Object.prototype.hasOwnProperty.call(b,f)&&(e=b[f],"function"!=typeof e&&(c.push(d),
+na(f,c),c.push(":"),ma(a,a.mc?a.mc.call(b,f,e):e,c),d=","));c.push("}");break;case "function":break;default:throw Error("Unknown type: "+typeof b);}}var oa={'"':'\\"',"\\":"\\\\","/":"\\/","\b":"\\b","\f":"\\f","\n":"\\n","\r":"\\r","\t":"\\t","\x0B":"\\u000b"},pa=/\uffff/.test("\uffff")?/[\\\"\x00-\x1f\x7f-\uffff]/g:/[\\\"\x00-\x1f\x7f-\xff]/g;
+function na(a,b){b.push('"',a.replace(pa,function(a){if(a in oa)return oa[a];var b=a.charCodeAt(0),e="\\u";16>b?e+="000":256>b?e+="00":4096>b&&(e+="0");return oa[a]=e+b.toString(16)}),'"')};function qa(a){return"undefined"!==typeof JSON&&n(JSON.parse)?JSON.parse(a):ka(a)}function u(a){if("undefined"!==typeof JSON&&n(JSON.stringify))a=JSON.stringify(a);else{var b=[];ma(new la,a,b);a=b.join("")}return a};function ra(a){for(var b=[],c=0,d=0;d<a.length;d++){var e=a.charCodeAt(d);55296<=e&&56319>=e&&(e-=55296,d++,v(d<a.length,"Surrogate pair missing trail surrogate."),e=65536+(e<<10)+(a.charCodeAt(d)-56320));128>e?b[c++]=e:(2048>e?b[c++]=e>>6|192:(65536>e?b[c++]=e>>12|224:(b[c++]=e>>18|240,b[c++]=e>>12&63|128),b[c++]=e>>6&63|128),b[c++]=e&63|128)}return b};var sa={};function x(a,b,c,d){var e;d<b?e="at least "+b:d>c&&(e=0===c?"none":"no more than "+c);if(e)throw Error(a+" failed: Was called with "+d+(1===d?" argument.":" arguments.")+" Expects "+e+".");}
+function y(a,b,c){var d="";switch(b){case 1:d=c?"first":"First";break;case 2:d=c?"second":"Second";break;case 3:d=c?"third":"Third";break;case 4:d=c?"fourth":"Fourth";break;default:ta.assert(!1,"errorPrefix_ called with argumentNumber > 4.  Need to update it?")}return a=a+" failed: "+(d+" argument ")}function z(a,b,c,d){if((!d||n(c))&&"function"!=da(c))throw Error(y(a,b,d)+"must be a valid function.");}
+function ua(a,b,c){if(n(c)&&(!ga(c)||null===c))throw Error(y(a,b,!0)+"must be a valid context object.");};function A(a,b){return Object.prototype.hasOwnProperty.call(a,b)}function va(a,b){if(Object.prototype.hasOwnProperty.call(a,b))return a[b]};var ta={},wa=/[\[\].#$\/]/,xa=/[\[\].#$]/;function ya(a){return q(a)&&0!==a.length&&!wa.test(a)}function za(a,b,c){c&&!n(b)||Aa(y(a,1,c),b)}
+function Aa(a,b,c,d){c||(c=0);d=d||[];if(!n(b))throw Error(a+"contains undefined"+Ba(d));if("function"==da(b))throw Error(a+"contains a function"+Ba(d)+" with contents: "+b.toString());if(Ca(b))throw Error(a+"contains "+b.toString()+Ba(d));if(1E3<c)throw new TypeError(a+"contains a cyclic object value ("+d.slice(0,100).join(".")+"...)");if(q(b)&&b.length>10485760/3&&10485760<ra(b).length)throw Error(a+"contains a string greater than 10485760 utf8 bytes"+Ba(d)+" ('"+b.substring(0,50)+"...')");if(ga(b))for(var e in b)if(A(b,
+e)){var f=b[e];if(".priority"!==e&&".value"!==e&&".sv"!==e&&!ya(e))throw Error(a+" contains an invalid key ("+e+")"+Ba(d)+'.  Keys must be non-empty strings and can\'t contain ".", "#", "$", "/", "[", or "]"');d.push(e);Aa(a,f,c+1,d);d.pop()}}function Ba(a){return 0==a.length?"":" in property '"+a.join(".")+"'"}function Da(a,b){if(!ga(b))throw Error(y(a,1,!1)+" must be an object containing the children to replace.");za(a,b,!1)}
+function Ea(a,b,c,d){if(!(d&&!n(c)||null===c||fa(c)||q(c)||ga(c)&&A(c,".sv")))throw Error(y(a,b,d)+"must be a valid firebase priority (a string, number, or null).");}function Fa(a,b,c){if(!c||n(b))switch(b){case "value":case "child_added":case "child_removed":case "child_changed":case "child_moved":break;default:throw Error(y(a,1,c)+'must be a valid event type: "value", "child_added", "child_removed", "child_changed", or "child_moved".');}}
+function Ga(a,b){if(n(b)&&!ya(b))throw Error(y(a,2,!0)+'was an invalid key: "'+b+'".  Firebase keys must be non-empty strings and can\'t contain ".", "#", "$", "/", "[", or "]").');}function Ha(a,b){if(!q(b)||0===b.length||xa.test(b))throw Error(y(a,1,!1)+'was an invalid path: "'+b+'". Paths must be non-empty strings and can\'t contain ".", "#", "$", "[", or "]"');}function B(a,b){if(".info"===C(b))throw Error(a+" failed: Can't modify data under /.info/");};function D(a,b,c,d,e,f,g){this.m=a;this.path=b;this.Ea=c;this.fa=d;this.ya=e;this.Ca=f;this.Wa=g;if(n(this.fa)&&n(this.Ca)&&n(this.Ea))throw"Query: Can't combine startAt(), endAt(), and limit().";}D.prototype.Uc=function(){x("Query.ref",0,0,arguments.length);return new E(this.m,this.path)};D.prototype.ref=D.prototype.Uc;
+D.prototype.fb=function(a,b){x("Query.on",2,4,arguments.length);Fa("Query.on",a,!1);z("Query.on",2,b,!1);var c=Ia("Query.on",arguments[2],arguments[3]);this.m.Rb(this,a,b,c.cancel,c.Y);return b};D.prototype.on=D.prototype.fb;D.prototype.yb=function(a,b,c){x("Query.off",0,3,arguments.length);Fa("Query.off",a,!0);z("Query.off",2,b,!0);ua("Query.off",3,c);this.m.lc(this,a,b,c)};D.prototype.off=D.prototype.yb;
+D.prototype.Wd=function(a,b){function c(g){f&&(f=!1,e.yb(a,c),b.call(d.Y,g))}x("Query.once",2,4,arguments.length);Fa("Query.once",a,!1);z("Query.once",2,b,!1);var d=Ia("Query.once",arguments[2],arguments[3]),e=this,f=!0;this.fb(a,c,function(b){e.yb(a,c);d.cancel&&d.cancel.call(d.Y,b)})};D.prototype.once=D.prototype.Wd;
+D.prototype.Pd=function(a){x("Query.limit",1,1,arguments.length);if(!fa(a)||Math.floor(a)!==a||0>=a)throw"Query.limit: First argument must be a positive integer.";return new D(this.m,this.path,a,this.fa,this.ya,this.Ca,this.Wa)};D.prototype.limit=D.prototype.Pd;D.prototype.ee=function(a,b){x("Query.startAt",0,2,arguments.length);Ea("Query.startAt",1,a,!0);Ga("Query.startAt",b);n(a)||(b=a=null);return new D(this.m,this.path,this.Ea,a,b,this.Ca,this.Wa)};D.prototype.startAt=D.prototype.ee;
+D.prototype.Jd=function(a,b){x("Query.endAt",0,2,arguments.length);Ea("Query.endAt",1,a,!0);Ga("Query.endAt",b);return new D(this.m,this.path,this.Ea,this.fa,this.ya,a,b)};D.prototype.endAt=D.prototype.Jd;function Ja(a){var b={};n(a.fa)&&(b.sp=a.fa);n(a.ya)&&(b.sn=a.ya);n(a.Ca)&&(b.ep=a.Ca);n(a.Wa)&&(b.en=a.Wa);n(a.Ea)&&(b.l=a.Ea);n(a.fa)&&n(a.ya)&&null===a.fa&&null===a.ya&&(b.vf="l");return b}D.prototype.Pa=function(){var a=Ka(Ja(this));return"{}"===a?"default":a};
+function Ia(a,b,c){var d={};if(b&&c)d.cancel=b,z(a,3,d.cancel,!0),d.Y=c,ua(a,4,d.Y);else if(b)if("object"===typeof b&&null!==b)d.Y=b;else if("function"===typeof b)d.cancel=b;else throw Error(sa.je(a,3,!0)+"must either be a cancel callback or a context object.");return d};function F(a,b){if(1==arguments.length){this.n=a.split("/");for(var c=0,d=0;d<this.n.length;d++)0<this.n[d].length&&(this.n[c]=this.n[d],c++);this.n.length=c;this.da=0}else this.n=a,this.da=b}function C(a){return a.da>=a.n.length?null:a.n[a.da]}function La(a){var b=a.da;b<a.n.length&&b++;return new F(a.n,b)}function Ma(a){return a.da<a.n.length?a.n[a.n.length-1]:null}h=F.prototype;h.toString=function(){for(var a="",b=this.da;b<this.n.length;b++)""!==this.n[b]&&(a+="/"+this.n[b]);return a||"/"};
+h.parent=function(){if(this.da>=this.n.length)return null;for(var a=[],b=this.da;b<this.n.length-1;b++)a.push(this.n[b]);return new F(a,0)};h.G=function(a){for(var b=[],c=this.da;c<this.n.length;c++)b.push(this.n[c]);if(a instanceof F)for(c=a.da;c<a.n.length;c++)b.push(a.n[c]);else for(a=a.split("/"),c=0;c<a.length;c++)0<a[c].length&&b.push(a[c]);return new F(b,0)};h.f=function(){return this.da>=this.n.length};
+function Na(a,b){var c=C(a);if(null===c)return b;if(c===C(b))return Na(La(a),La(b));throw"INTERNAL ERROR: innerPath ("+b+") is not within outerPath ("+a+")";}h.contains=function(a){var b=0;if(this.n.length>a.n.length)return!1;for(;b<this.n.length;){if(this.n[b]!==a.n[b])return!1;++b}return!0};function Oa(){this.children={};this.yc=0;this.value=null}function Pa(a,b,c){this.Fa=a?a:"";this.Eb=b?b:null;this.B=c?c:new Oa}function I(a,b){for(var c=b instanceof F?b:new F(b),d=a,e;null!==(e=C(c));)d=new Pa(e,d,va(d.B.children,e)||new Oa),c=La(c);return d}h=Pa.prototype;h.j=function(){return this.B.value};function J(a,b){v("undefined"!==typeof b,"Cannot set value to undefined");a.B.value=b;Qa(a)}h.sb=function(){return 0<this.B.yc};h.f=function(){return null===this.j()&&!this.sb()};
+h.A=function(a){for(var b in this.B.children)a(new Pa(b,this,this.B.children[b]))};function Ra(a,b,c,d){c&&!d&&b(a);a.A(function(a){Ra(a,b,!0,d)});c&&d&&b(a)}function Sa(a,b,c){for(a=c?a:a.parent();null!==a;){if(b(a))return!0;a=a.parent()}return!1}h.path=function(){return new F(null===this.Eb?this.Fa:this.Eb.path()+"/"+this.Fa)};h.name=function(){return this.Fa};h.parent=function(){return this.Eb};
+function Qa(a){if(null!==a.Eb){var b=a.Eb,c=a.Fa,d=a.f(),e=A(b.B.children,c);d&&e?(delete b.B.children[c],b.B.yc--,Qa(b)):d||e||(b.B.children[c]=a.B,b.B.yc++,Qa(b))}};function Ta(a,b){this.Ta=a?a:Ua;this.ea=b?b:Va}function Ua(a,b){return a<b?-1:a>b?1:0}h=Ta.prototype;h.sa=function(a,b){return new Ta(this.Ta,this.ea.sa(a,b,this.Ta).J(null,null,!1,null,null))};h.remove=function(a){return new Ta(this.Ta,this.ea.remove(a,this.Ta).J(null,null,!1,null,null))};h.get=function(a){for(var b,c=this.ea;!c.f();){b=this.Ta(a,c.key);if(0===b)return c.value;0>b?c=c.left:0<b&&(c=c.right)}return null};
+function Wa(a,b){for(var c,d=a.ea,e=null;!d.f();){c=a.Ta(b,d.key);if(0===c){if(d.left.f())return e?e.key:null;for(d=d.left;!d.right.f();)d=d.right;return d.key}0>c?d=d.left:0<c&&(e=d,d=d.right)}throw Error("Attempted to find predecessor key for a nonexistent key.  What gives?");}h.f=function(){return this.ea.f()};h.count=function(){return this.ea.count()};h.xb=function(){return this.ea.xb()};h.bb=function(){return this.ea.bb()};h.Da=function(a){return this.ea.Da(a)};h.Qa=function(a){return this.ea.Qa(a)};
+h.Za=function(a){return new Xa(this.ea,a)};function Xa(a,b){this.ud=b;for(this.Zb=[];!a.f();)this.Zb.push(a),a=a.left}function Ya(a){if(0===a.Zb.length)return null;var b=a.Zb.pop(),c;c=a.ud?a.ud(b.key,b.value):{key:b.key,value:b.value};for(b=b.right;!b.f();)a.Zb.push(b),b=b.left;return c}function Za(a,b,c,d,e){this.key=a;this.value=b;this.color=null!=c?c:!0;this.left=null!=d?d:Va;this.right=null!=e?e:Va}h=Za.prototype;
+h.J=function(a,b,c,d,e){return new Za(null!=a?a:this.key,null!=b?b:this.value,null!=c?c:this.color,null!=d?d:this.left,null!=e?e:this.right)};h.count=function(){return this.left.count()+1+this.right.count()};h.f=function(){return!1};h.Da=function(a){return this.left.Da(a)||a(this.key,this.value)||this.right.Da(a)};h.Qa=function(a){return this.right.Qa(a)||a(this.key,this.value)||this.left.Qa(a)};function bb(a){return a.left.f()?a:bb(a.left)}h.xb=function(){return bb(this).key};
+h.bb=function(){return this.right.f()?this.key:this.right.bb()};h.sa=function(a,b,c){var d,e;e=this;d=c(a,e.key);e=0>d?e.J(null,null,null,e.left.sa(a,b,c),null):0===d?e.J(null,b,null,null,null):e.J(null,null,null,null,e.right.sa(a,b,c));return cb(e)};function db(a){if(a.left.f())return Va;a.left.Q()||a.left.left.Q()||(a=eb(a));a=a.J(null,null,null,db(a.left),null);return cb(a)}
+h.remove=function(a,b){var c,d;c=this;if(0>b(a,c.key))c.left.f()||c.left.Q()||c.left.left.Q()||(c=eb(c)),c=c.J(null,null,null,c.left.remove(a,b),null);else{c.left.Q()&&(c=fb(c));c.right.f()||c.right.Q()||c.right.left.Q()||(c=gb(c),c.left.left.Q()&&(c=fb(c),c=gb(c)));if(0===b(a,c.key)){if(c.right.f())return Va;d=bb(c.right);c=c.J(d.key,d.value,null,null,db(c.right))}c=c.J(null,null,null,null,c.right.remove(a,b))}return cb(c)};h.Q=function(){return this.color};
+function cb(a){a.right.Q()&&!a.left.Q()&&(a=hb(a));a.left.Q()&&a.left.left.Q()&&(a=fb(a));a.left.Q()&&a.right.Q()&&(a=gb(a));return a}function eb(a){a=gb(a);a.right.left.Q()&&(a=a.J(null,null,null,null,fb(a.right)),a=hb(a),a=gb(a));return a}function hb(a){return a.right.J(null,null,a.color,a.J(null,null,!0,null,a.right.left),null)}function fb(a){return a.left.J(null,null,a.color,null,a.J(null,null,!0,a.left.right,null))}
+function gb(a){return a.J(null,null,!a.color,a.left.J(null,null,!a.left.color,null,null),a.right.J(null,null,!a.right.color,null,null))}function ib(){}h=ib.prototype;h.J=function(){return this};h.sa=function(a,b){return new Za(a,b,null)};h.remove=function(){return this};h.count=function(){return 0};h.f=function(){return!0};h.Da=function(){return!1};h.Qa=function(){return!1};h.xb=function(){return null};h.bb=function(){return null};h.Q=function(){return!1};var Va=new ib;function jb(a){this.Ub=a;this.hc="firebase:"}jb.prototype.set=function(a,b){null==b?this.Ub.removeItem(this.hc+a):this.Ub.setItem(this.hc+a,u(b))};jb.prototype.get=function(a){a=this.Ub.getItem(this.hc+a);return null==a?null:qa(a)};jb.prototype.remove=function(a){this.Ub.removeItem(this.hc+a)};jb.prototype.nd=!1;function kb(){this.nb={}}kb.prototype.set=function(a,b){null==b?delete this.nb[a]:this.nb[a]=b};kb.prototype.get=function(a){return A(this.nb,a)?this.nb[a]:null};kb.prototype.remove=function(a){delete this.nb[a]};kb.prototype.nd=!0;function lb(a){try{if("undefined"!==typeof window&&"undefined"!==typeof window[a]){var b=window[a];b.setItem("firebase:sentinel","cache");b.removeItem("firebase:sentinel");return new jb(b)}}catch(c){}return new kb}var mb=lb("localStorage"),nb=lb("sessionStorage");function ob(a,b,c,d){this.host=a.toLowerCase();this.domain=this.host.substr(this.host.indexOf(".")+1);this.nc=b;this.Yb=c;this.ge=d;this.ha=mb.get("host:"+a)||this.host}function pb(a,b){b!==a.ha&&(a.ha=b,"s-"===a.ha.substr(0,2)&&mb.set("host:"+a.host,a.ha))}ob.prototype.toString=function(){return(this.nc?"https://":"http://")+this.host};function qb(){this.qa=-1};function rb(){this.qa=-1;this.qa=64;this.C=[];this.xc=[];this.Ed=[];this.ec=[];this.ec[0]=128;for(var a=1;a<this.qa;++a)this.ec[a]=0;this.rc=this.$a=0;this.reset()}ja(rb,qb);rb.prototype.reset=function(){this.C[0]=1732584193;this.C[1]=4023233417;this.C[2]=2562383102;this.C[3]=271733878;this.C[4]=3285377520;this.rc=this.$a=0};
+function sb(a,b,c){c||(c=0);var d=a.Ed;if(q(b))for(var e=0;16>e;e++)d[e]=b.charCodeAt(c)<<24|b.charCodeAt(c+1)<<16|b.charCodeAt(c+2)<<8|b.charCodeAt(c+3),c+=4;else for(e=0;16>e;e++)d[e]=b[c]<<24|b[c+1]<<16|b[c+2]<<8|b[c+3],c+=4;for(e=16;80>e;e++){var f=d[e-3]^d[e-8]^d[e-14]^d[e-16];d[e]=(f<<1|f>>>31)&4294967295}b=a.C[0];c=a.C[1];for(var g=a.C[2],k=a.C[3],l=a.C[4],m,e=0;80>e;e++)40>e?20>e?(f=k^c&(g^k),m=1518500249):(f=c^g^k,m=1859775393):60>e?(f=c&g|k&(c|g),m=2400959708):(f=c^g^k,m=3395469782),f=(b<<
+5|b>>>27)+f+l+m+d[e]&4294967295,l=k,k=g,g=(c<<30|c>>>2)&4294967295,c=b,b=f;a.C[0]=a.C[0]+b&4294967295;a.C[1]=a.C[1]+c&4294967295;a.C[2]=a.C[2]+g&4294967295;a.C[3]=a.C[3]+k&4294967295;a.C[4]=a.C[4]+l&4294967295}
+rb.prototype.update=function(a,b){n(b)||(b=a.length);for(var c=b-this.qa,d=0,e=this.xc,f=this.$a;d<b;){if(0==f)for(;d<=c;)sb(this,a,d),d+=this.qa;if(q(a))for(;d<b;){if(e[f]=a.charCodeAt(d),++f,++d,f==this.qa){sb(this,e);f=0;break}}else for(;d<b;)if(e[f]=a[d],++f,++d,f==this.qa){sb(this,e);f=0;break}}this.$a=f;this.rc+=b};var tb=Array.prototype,ub=tb.forEach?function(a,b,c){tb.forEach.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=q(a)?a.split(""):a,f=0;f<d;f++)f in e&&b.call(c,e[f],f,a)},vb=tb.map?function(a,b,c){return tb.map.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=Array(d),f=q(a)?a.split(""):a,g=0;g<d;g++)g in f&&(e[g]=b.call(c,f[g],g,a));return e},wb=tb.reduce?function(a,b,c,d){d&&(b=r(b,d));return tb.reduce.call(a,b,c)}:function(a,b,c,d){var e=c;ub(a,function(c,g){e=b.call(d,e,c,g,a)});return e},
+xb=tb.every?function(a,b,c){return tb.every.call(a,b,c)}:function(a,b,c){for(var d=a.length,e=q(a)?a.split(""):a,f=0;f<d;f++)if(f in e&&!b.call(c,e[f],f,a))return!1;return!0};function yb(a,b){var c;a:{c=a.length;for(var d=q(a)?a.split(""):a,e=0;e<c;e++)if(e in d&&b.call(void 0,d[e],e,a)){c=e;break a}c=-1}return 0>c?null:q(a)?a.charAt(c):a[c]};var zb;a:{var Ab=aa.navigator;if(Ab){var Bb=Ab.userAgent;if(Bb){zb=Bb;break a}}zb=""}function Cb(a){return-1!=zb.indexOf(a)};var Db=Cb("Opera")||Cb("OPR"),Eb=Cb("Trident")||Cb("MSIE"),Fb=Cb("Gecko")&&-1==zb.toLowerCase().indexOf("webkit")&&!(Cb("Trident")||Cb("MSIE")),Gb=-1!=zb.toLowerCase().indexOf("webkit");(function(){var a="",b;if(Db&&aa.opera)return a=aa.opera.version,"function"==da(a)?a():a;Fb?b=/rv\:([^\);]+)(\)|;)/:Eb?b=/\b(?:MSIE|rv)[: ]([^\);]+)(\)|;)/:Gb&&(b=/WebKit\/(\S+)/);b&&(a=(a=b.exec(zb))?a[1]:"");return Eb&&(b=(b=aa.document)?b.documentMode:void 0,b>parseFloat(a))?String(b):a})();var Hb=null,Ib=null;
+function Jb(a,b){if(!ea(a))throw Error("encodeByteArray takes an array as a parameter");if(!Hb){Hb={};Ib={};for(var c=0;65>c;c++)Hb[c]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".charAt(c),Ib[c]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.".charAt(c)}for(var c=b?Ib:Hb,d=[],e=0;e<a.length;e+=3){var f=a[e],g=e+1<a.length,k=g?a[e+1]:0,l=e+2<a.length,m=l?a[e+2]:0,p=f>>2,f=(f&3)<<4|k>>4,k=(k&15)<<2|m>>6,m=m&63;l||(m=64,g||(k=64));d.push(c[p],c[f],c[k],c[m])}return d.join("")}
+;var Kb=function(){var a=1;return function(){return a++}}();function v(a,b){if(!a)throw Error("Firebase INTERNAL ASSERT FAILED:"+b);}function Lb(a){var b=ra(a);a=new rb;a.update(b);var b=[],c=8*a.rc;56>a.$a?a.update(a.ec,56-a.$a):a.update(a.ec,a.qa-(a.$a-56));for(var d=a.qa-1;56<=d;d--)a.xc[d]=c&255,c/=256;sb(a,a.xc);for(d=c=0;5>d;d++)for(var e=24;0<=e;e-=8)b[c]=a.C[d]>>e&255,++c;return Jb(b)}
+function Mb(a){for(var b="",c=0;c<arguments.length;c++)b=ea(arguments[c])?b+Mb.apply(null,arguments[c]):"object"===typeof arguments[c]?b+u(arguments[c]):b+arguments[c],b+=" ";return b}var Nb=null,Ob=!0;function K(a){!0===Ob&&(Ob=!1,null===Nb&&!0===nb.get("logging_enabled")&&Pb(!0));if(Nb){var b=Mb.apply(null,arguments);Nb(b)}}function Qb(a){return function(){K(a,arguments)}}
+function Rb(a){if("undefined"!==typeof console){var b="FIREBASE INTERNAL ERROR: "+Mb.apply(null,arguments);"undefined"!==typeof console.error?console.error(b):console.log(b)}}function Sb(a){var b=Mb.apply(null,arguments);throw Error("FIREBASE FATAL ERROR: "+b);}function L(a){if("undefined"!==typeof console){var b="FIREBASE WARNING: "+Mb.apply(null,arguments);"undefined"!==typeof console.warn?console.warn(b):console.log(b)}}
+function Ca(a){return fa(a)&&(a!=a||a==Number.POSITIVE_INFINITY||a==Number.NEGATIVE_INFINITY)}function Tb(a){if("complete"===document.readyState)a();else{var b=!1,c=function(){document.body?b||(b=!0,a()):setTimeout(c,10)};document.addEventListener?(document.addEventListener("DOMContentLoaded",c,!1),window.addEventListener("load",c,!1)):document.attachEvent&&(document.attachEvent("onreadystatechange",function(){"complete"===document.readyState&&c()}),window.attachEvent("onload",c))}}
+function Ub(a,b){return a!==b?null===a?-1:null===b?1:typeof a!==typeof b?"number"===typeof a?-1:1:a>b?1:-1:0}function Vb(a,b){if(a===b)return 0;var c=Wb(a),d=Wb(b);return null!==c?null!==d?0==c-d?a.length-b.length:c-d:-1:null!==d?1:a<b?-1:1}function Xb(a,b){if(b&&a in b)return b[a];throw Error("Missing required key ("+a+") in object: "+u(b));}
+function Ka(a){if("object"!==typeof a||null===a)return u(a);var b=[],c;for(c in a)b.push(c);b.sort();c="{";for(var d=0;d<b.length;d++)0!==d&&(c+=","),c+=u(b[d]),c+=":",c+=Ka(a[b[d]]);return c+"}"}function Yb(a,b){if(a.length<=b)return[a];for(var c=[],d=0;d<a.length;d+=b)d+b>a?c.push(a.substring(d,a.length)):c.push(a.substring(d,d+b));return c}function Zb(a,b){if("array"==da(a))for(var c=0;c<a.length;++c)b(c,a[c]);else $b(a,b)}function ac(a,b){return b?r(a,b):a}
+function bc(a){v(!Ca(a),"Invalid JSON number");var b,c,d,e;0===a?(d=c=0,b=-Infinity===1/a?1:0):(b=0>a,a=Math.abs(a),a>=Math.pow(2,-1022)?(d=Math.min(Math.floor(Math.log(a)/Math.LN2),1023),c=d+1023,d=Math.round(a*Math.pow(2,52-d)-Math.pow(2,52))):(c=0,d=Math.round(a/Math.pow(2,-1074))));e=[];for(a=52;a;a-=1)e.push(d%2?1:0),d=Math.floor(d/2);for(a=11;a;a-=1)e.push(c%2?1:0),c=Math.floor(c/2);e.push(b?1:0);e.reverse();b=e.join("");c="";for(a=0;64>a;a+=8)d=parseInt(b.substr(a,8),2).toString(16),1===d.length&&
+(d="0"+d),c+=d;return c.toLowerCase()}function cc(a){var b="Unknown Error";"too_big"===a?b="The data requested exceeds the maximum size that can be accessed with a single request.":"permission_denied"==a?b="Client doesn't have permission to access the desired data.":"unavailable"==a&&(b="The service is unavailable");b=Error(a+": "+b);b.code=a.toUpperCase();return b}var dc=/^-?\d{1,10}$/;function Wb(a){return dc.test(a)&&(a=Number(a),-2147483648<=a&&2147483647>=a)?a:null}
+function ec(a){try{a()}catch(b){setTimeout(function(){throw b;},0)}};function fc(a,b){this.F=a;v(null!==this.F,"LeafNode shouldn't be created with null value.");this.gb="undefined"!==typeof b?b:null}h=fc.prototype;h.P=function(){return!0};h.k=function(){return this.gb};h.Ia=function(a){return new fc(this.F,a)};h.O=function(){return M};h.L=function(a){return null===C(a)?this:M};h.ga=function(){return null};h.H=function(a,b){return(new N).H(a,b).Ia(this.gb)};h.Aa=function(a,b){var c=C(a);return null===c?b:this.H(c,M.Aa(La(a),b))};h.f=function(){return!1};h.$b=function(){return 0};
+h.V=function(a){return a&&null!==this.k()?{".value":this.j(),".priority":this.k()}:this.j()};h.hash=function(){var a="";null!==this.k()&&(a+="priority:"+gc(this.k())+":");var b=typeof this.F,a=a+(b+":"),a="number"===b?a+bc(this.F):a+this.F;return Lb(a)};h.j=function(){return this.F};h.toString=function(){return"string"===typeof this.F?this.F:'"'+this.F+'"'};function ic(a,b){return Ub(a.ka,b.ka)||Vb(a.name,b.name)}function jc(a,b){return Vb(a.name,b.name)}function kc(a,b){return Vb(a,b)};function N(a,b){this.o=a||new Ta(kc);this.gb="undefined"!==typeof b?b:null}h=N.prototype;h.P=function(){return!1};h.k=function(){return this.gb};h.Ia=function(a){return new N(this.o,a)};h.H=function(a,b){var c=this.o.remove(a);b&&b.f()&&(b=null);null!==b&&(c=c.sa(a,b));return b&&null!==b.k()?new lc(c,null,this.gb):new N(c,this.gb)};h.Aa=function(a,b){var c=C(a);if(null===c)return b;var d=this.O(c).Aa(La(a),b);return this.H(c,d)};h.f=function(){return this.o.f()};h.$b=function(){return this.o.count()};
+var mc=/^\d+$/;h=N.prototype;h.V=function(a){if(this.f())return null;var b={},c=0,d=0,e=!0;this.A(function(f,g){b[f]=g.V(a);c++;e&&mc.test(f)?d=Math.max(d,Number(f)):e=!1});if(!a&&e&&d<2*c){var f=[],g;for(g in b)f[g]=b[g];return f}a&&null!==this.k()&&(b[".priority"]=this.k());return b};h.hash=function(){var a="";null!==this.k()&&(a+="priority:"+gc(this.k())+":");this.A(function(b,c){var d=c.hash();""!==d&&(a+=":"+b+":"+d)});return""===a?"":Lb(a)};
+h.O=function(a){a=this.o.get(a);return null===a?M:a};h.L=function(a){var b=C(a);return null===b?this:this.O(b).L(La(a))};h.ga=function(a){return Wa(this.o,a)};h.hd=function(){return this.o.xb()};h.kd=function(){return this.o.bb()};h.A=function(a){return this.o.Da(a)};h.Ec=function(a){return this.o.Qa(a)};h.Za=function(){return this.o.Za()};h.toString=function(){var a="{",b=!0;this.A(function(c,d){b?b=!1:a+=", ";a+='"'+c+'" : '+d.toString()});return a+="}"};var M=new N;function lc(a,b,c){N.call(this,a,c);null===b&&(b=new Ta(ic),a.Da(function(a,c){b=b.sa({name:a,ka:c.k()},c)}));this.xa=b}ja(lc,N);h=lc.prototype;h.H=function(a,b){var c=this.O(a),d=this.o,e=this.xa;null!==c&&(d=d.remove(a),e=e.remove({name:a,ka:c.k()}));b&&b.f()&&(b=null);null!==b&&(d=d.sa(a,b),e=e.sa({name:a,ka:b.k()},b));return new lc(d,e,this.k())};h.ga=function(a,b){var c=Wa(this.xa,{name:a,ka:b.k()});return c?c.name:null};h.A=function(a){return this.xa.Da(function(b,c){return a(b.name,c)})};
+h.Ec=function(a){return this.xa.Qa(function(b,c){return a(b.name,c)})};h.Za=function(){return this.xa.Za(function(a,b){return{key:a.name,value:b}})};h.hd=function(){return this.xa.f()?null:this.xa.xb().name};h.kd=function(){return this.xa.f()?null:this.xa.bb().name};function O(a,b){if(null===a)return M;var c=null;"object"===typeof a&&".priority"in a?c=a[".priority"]:"undefined"!==typeof b&&(c=b);v(null===c||"string"===typeof c||"number"===typeof c||"object"===typeof c&&".sv"in c,"Invalid priority type found: "+typeof c);"object"===typeof a&&".value"in a&&null!==a[".value"]&&(a=a[".value"]);if("object"!==typeof a||".sv"in a)return new fc(a,c);if(a instanceof Array){var d=M,e=a;$b(e,function(a,b){if(A(e,b)&&"."!==b.substring(0,1)){var c=O(a);if(c.P()||!c.f())d=
+d.H(b,c)}});return d.Ia(c)}var f=[],g={},k=!1,l=a;Zb(l,function(a,b){if("string"!==typeof b||"."!==b.substring(0,1)){var c=O(l[b]);c.f()||(k=k||null!==c.k(),f.push({name:b,ka:c.k()}),g[b]=c)}});var m=nc(f,g,!1);if(k){var p=nc(f,g,!0);return new lc(m,p,c)}return new N(m,c)}var oc=Math.log(2);function pc(a){this.count=parseInt(Math.log(a+1)/oc,10);this.ed=this.count-1;this.Gd=a+1&parseInt(Array(this.count+1).join("1"),2)}function qc(a){var b=!(a.Gd&1<<a.ed);a.ed--;return b}
+function nc(a,b,c){function d(e,f){var l=f-e;if(0==l)return null;if(1==l){var l=a[e].name,m=c?a[e]:l;return new Za(m,b[l],!1,null,null)}var m=parseInt(l/2,10)+e,p=d(e,m),t=d(m+1,f),l=a[m].name,m=c?a[m]:l;return new Za(m,b[l],!1,p,t)}var e=c?ic:jc;a.sort(e);var f=function(e){function f(e,g){var k=p-e,t=p;p-=e;var s=a[k].name,k=new Za(c?a[k]:s,b[s],g,null,d(k+1,t));l?l.left=k:m=k;l=k}for(var l=null,m=null,p=a.length,t=0;t<e.count;++t){var s=qc(e),w=Math.pow(2,e.count-(t+1));s?f(w,!1):(f(w,!1),f(w,!0))}return m}(new pc(a.length)),
+e=c?ic:kc;return null!==f?new Ta(e,f):new Ta(e)}function gc(a){return"number"===typeof a?"number:"+bc(a):"string:"+a};function P(a,b){this.B=a;this.kc=b}P.prototype.V=function(){x("Firebase.DataSnapshot.val",0,0,arguments.length);return this.B.V()};P.prototype.val=P.prototype.V;P.prototype.Kd=function(){x("Firebase.DataSnapshot.exportVal",0,0,arguments.length);return this.B.V(!0)};P.prototype.exportVal=P.prototype.Kd;P.prototype.G=function(a){x("Firebase.DataSnapshot.child",0,1,arguments.length);fa(a)&&(a=String(a));Ha("Firebase.DataSnapshot.child",a);var b=new F(a),c=this.kc.G(b);return new P(this.B.L(b),c)};
+P.prototype.child=P.prototype.G;P.prototype.Hc=function(a){x("Firebase.DataSnapshot.hasChild",1,1,arguments.length);Ha("Firebase.DataSnapshot.hasChild",a);var b=new F(a);return!this.B.L(b).f()};P.prototype.hasChild=P.prototype.Hc;P.prototype.k=function(){x("Firebase.DataSnapshot.getPriority",0,0,arguments.length);return this.B.k()};P.prototype.getPriority=P.prototype.k;
+P.prototype.forEach=function(a){x("Firebase.DataSnapshot.forEach",1,1,arguments.length);z("Firebase.DataSnapshot.forEach",1,a,!1);if(this.B.P())return!1;var b=this;return this.B.A(function(c,d){return a(new P(d,b.kc.G(c)))})};P.prototype.forEach=P.prototype.forEach;P.prototype.sb=function(){x("Firebase.DataSnapshot.hasChildren",0,0,arguments.length);return this.B.P()?!1:!this.B.f()};P.prototype.hasChildren=P.prototype.sb;
+P.prototype.name=function(){x("Firebase.DataSnapshot.name",0,0,arguments.length);return this.kc.name()};P.prototype.name=P.prototype.name;P.prototype.$b=function(){x("Firebase.DataSnapshot.numChildren",0,0,arguments.length);return this.B.$b()};P.prototype.numChildren=P.prototype.$b;P.prototype.Uc=function(){x("Firebase.DataSnapshot.ref",0,0,arguments.length);return this.kc};P.prototype.ref=P.prototype.Uc;function rc(a){v("array"==da(a)&&0<a.length,"Requires a non-empty array");this.Fd=a;this.wb={}}rc.prototype.bd=function(a,b){for(var c=this.wb[a]||[],d=0;d<c.length;d++)c[d].ba.apply(c[d].Y,Array.prototype.slice.call(arguments,1))};rc.prototype.fb=function(a,b,c){sc(this,a);this.wb[a]=this.wb[a]||[];this.wb[a].push({ba:b,Y:c});(a=this.jd(a))&&b.apply(c,a)};rc.prototype.yb=function(a,b,c){sc(this,a);a=this.wb[a]||[];for(var d=0;d<a.length;d++)if(a[d].ba===b&&(!c||c===a[d].Y)){a.splice(d,1);break}};
+function sc(a,b){v(yb(a.Fd,function(a){return a===b}),"Unknown event: "+b)};function tc(){rc.call(this,["visible"]);var a,b;"undefined"!==typeof document&&"undefined"!==typeof document.addEventListener&&("undefined"!==typeof document.hidden?(b="visibilitychange",a="hidden"):"undefined"!==typeof document.mozHidden?(b="mozvisibilitychange",a="mozHidden"):"undefined"!==typeof document.msHidden?(b="msvisibilitychange",a="msHidden"):"undefined"!==typeof document.webkitHidden&&(b="webkitvisibilitychange",a="webkitHidden"));this.lb=!0;if(b){var c=this;document.addEventListener(b,
+function(){var b=!document[a];b!==c.lb&&(c.lb=b,c.bd("visible",b))},!1)}}ja(tc,rc);ca(tc);tc.prototype.jd=function(a){v("visible"===a,"Unknown event type: "+a);return[this.lb]};function uc(){rc.call(this,["online"]);this.Cb=!0;if("undefined"!==typeof window&&"undefined"!==typeof window.addEventListener){var a=this;window.addEventListener("online",function(){a.Cb||a.bd("online",!0);a.Cb=!0},!1);window.addEventListener("offline",function(){a.Cb&&a.bd("online",!1);a.Cb=!1},!1)}}ja(uc,rc);ca(uc);uc.prototype.jd=function(a){v("online"===a,"Unknown event type: "+a);return[this.Cb]};function $b(a,b){for(var c in a)b.call(void 0,a[c],c,a)}function vc(a){var b=[],c=0,d;for(d in a)b[c++]=d;return b}function wc(a){var b={},c;for(c in a)b[c]=a[c];return b};function xc(){this.ob={}}function yc(a,b,c){n(c)||(c=1);A(a.ob,b)||(a.ob[b]=0);a.ob[b]+=c}xc.prototype.get=function(){return wc(this.ob)};function zc(a){this.Hd=a;this.Wb=null}zc.prototype.get=function(){var a=this.Hd.get(),b=wc(a);if(this.Wb)for(var c in this.Wb)b[c]-=this.Wb[c];this.Wb=a;return b};function Ac(a,b){this.Zc={};this.qc=new zc(a);this.u=b;setTimeout(r(this.sd,this),10+6E4*Math.random())}Ac.prototype.sd=function(){var a=this.qc.get(),b={},c=!1,d;for(d in a)0<a[d]&&A(this.Zc,d)&&(b[d]=a[d],c=!0);c&&(a=this.u,a.S&&(b={c:b},a.e("reportStats",b),a.Ga("s",b)));setTimeout(r(this.sd,this),6E5*Math.random())};var Bc={},Cc={};function Dc(a){a=a.toString();Bc[a]||(Bc[a]=new xc);return Bc[a]}function Ec(a,b){var c=a.toString();Cc[c]||(Cc[c]=b());return Cc[c]};var Fc=null;"undefined"!==typeof MozWebSocket?Fc=MozWebSocket:"undefined"!==typeof WebSocket&&(Fc=WebSocket);function Q(a,b,c){this.Ac=a;this.e=Qb(this.Ac);this.frames=this.ub=null;this.ad=0;this.aa=Dc(b);this.Ua=(b.nc?"wss://":"ws://")+b.ha+"/.ws?v=5";b.host!==b.ha&&(this.Ua=this.Ua+"&ns="+b.Yb);c&&(this.Ua=this.Ua+"&s="+c)}var Gc;
+Q.prototype.open=function(a,b){this.ja=b;this.Td=a;this.e("Websocket connecting to "+this.Ua);this.W=new Fc(this.Ua);this.pb=!1;mb.set("previous_websocket_failure",!0);var c=this;this.W.onopen=function(){c.e("Websocket connected.");c.pb=!0};this.W.onclose=function(){c.e("Websocket connection was disconnected.");c.W=null;c.Oa()};this.W.onmessage=function(a){if(null!==c.W)if(a=a.data,yc(c.aa,"bytes_received",a.length),Hc(c),null!==c.frames)Ic(c,a);else{a:{v(null===c.frames,"We already have a frame buffer");
+if(6>=a.length){var b=Number(a);if(!isNaN(b)){c.ad=b;c.frames=[];a=null;break a}}c.ad=1;c.frames=[]}null!==a&&Ic(c,a)}};this.W.onerror=function(a){c.e("WebSocket error.  Closing connection.");(a=a.message||a.data)&&c.e(a);c.Oa()}};Q.prototype.start=function(){};Q.isAvailable=function(){var a=!1;if("undefined"!==typeof navigator&&navigator.userAgent){var b=navigator.userAgent.match(/Android ([0-9]{0,}\.[0-9]{0,})/);b&&1<b.length&&4.4>parseFloat(b[1])&&(a=!0)}return!a&&null!==Fc&&!Gc};
+Q.responsesRequiredToBeHealthy=2;Q.healthyTimeout=3E4;h=Q.prototype;h.Lc=function(){mb.remove("previous_websocket_failure")};function Ic(a,b){a.frames.push(b);if(a.frames.length==a.ad){var c=a.frames.join("");a.frames=null;c=qa(c);a.Td(c)}}h.send=function(a){Hc(this);a=u(a);yc(this.aa,"bytes_sent",a.length);a=Yb(a,16384);1<a.length&&this.W.send(String(a.length));for(var b=0;b<a.length;b++)this.W.send(a[b])};
+h.Mb=function(){this.Ma=!0;this.ub&&(clearInterval(this.ub),this.ub=null);this.W&&(this.W.close(),this.W=null)};h.Oa=function(){this.Ma||(this.e("WebSocket is closing itself"),this.Mb(),this.ja&&(this.ja(this.pb),this.ja=null))};h.close=function(){this.Ma||(this.e("WebSocket is being closed"),this.Mb())};function Hc(a){clearInterval(a.ub);a.ub=setInterval(function(){a.W&&a.W.send("0");Hc(a)},45E3)};function Jc(a){this.Pc=a;this.gc=[];this.Va=0;this.zc=-1;this.Na=null}function Kc(a,b,c){a.zc=b;a.Na=c;a.zc<a.Va&&(a.Na(),a.Na=null)}function Lc(a,b,c){for(a.gc[b]=c;a.gc[a.Va];){var d=a.gc[a.Va];delete a.gc[a.Va];for(var e=0;e<d.length;++e)if(d[e]){var f=a;ec(function(){f.Pc(d[e])})}if(a.Va===a.zc){a.Na&&(clearTimeout(a.Na),a.Na(),a.Na=null);break}a.Va++}};function Mc(){this.set={}}h=Mc.prototype;h.add=function(a,b){this.set[a]=null!==b?b:!0};h.contains=function(a){return A(this.set,a)};h.get=function(a){return this.contains(a)?this.set[a]:void 0};h.remove=function(a){delete this.set[a]};h.f=function(){var a;a:{a=this.set;for(var b in a){a=!1;break a}a=!0}return a};h.count=function(){var a=this.set,b=0,c;for(c in a)b++;return b};function R(a,b){$b(a.set,function(a,d){b(d,a)})}h.keys=function(){var a=[];$b(this.set,function(b,c){a.push(c)});return a};function Nc(a,b,c){this.Ac=a;this.e=Qb(a);this.aa=Dc(b);this.pc=c;this.pb=!1;this.Qb=function(a){b.host!==b.ha&&(a.ns=b.Yb);var c=[],f;for(f in a)a.hasOwnProperty(f)&&c.push(f+"="+a[f]);return(b.nc?"https://":"http://")+b.ha+"/.lp?"+c.join("&")}}var Oc,Pc;
+Nc.prototype.open=function(a,b){this.dd=0;this.T=b;this.od=new Jc(a);this.Ma=!1;var c=this;this.Ja=setTimeout(function(){c.e("Timed out trying to connect.");c.Oa();c.Ja=null},3E4);Tb(function(){if(!c.Ma){c.ma=new Qc(function(a,b,d,k,l){yc(c.aa,"bytes_received",u(arguments).length);if(c.ma)if(c.Ja&&(clearTimeout(c.Ja),c.Ja=null),c.pb=!0,"start"==a)c.id=b,c.rd=d;else if("close"===a)b?(c.ma.oc=!1,Kc(c.od,b,function(){c.Oa()})):c.Oa();else throw Error("Unrecognized command received: "+a);},function(a,
+b){yc(c.aa,"bytes_received",u(arguments).length);Lc(c.od,a,b)},function(){c.Oa()},c.Qb);var a={start:"t"};a.ser=Math.floor(1E8*Math.random());c.ma.sc&&(a.cb=c.ma.sc);a.v="5";c.pc&&(a.s=c.pc);a=c.Qb(a);c.e("Connecting via long-poll to "+a);Rc(c.ma,a,function(){})}})};
+Nc.prototype.start=function(){var a=this.ma,b=this.rd;a.Rd=this.id;a.Sd=b;for(a.vc=!0;Sc(a););a=this.id;b=this.rd;this.eb=document.createElement("iframe");var c={dframe:"t"};c.id=a;c.pw=b;this.eb.src=this.Qb(c);this.eb.style.display="none";document.body.appendChild(this.eb)};Nc.isAvailable=function(){return!Pc&&!("object"===typeof window&&window.chrome&&window.chrome.extension&&!/^chrome/.test(window.location.href))&&!("object"===typeof Windows&&"object"===typeof Windows.he)&&(Oc||!0)};h=Nc.prototype;
+h.Lc=function(){};h.Mb=function(){this.Ma=!0;this.ma&&(this.ma.close(),this.ma=null);this.eb&&(document.body.removeChild(this.eb),this.eb=null);this.Ja&&(clearTimeout(this.Ja),this.Ja=null)};h.Oa=function(){this.Ma||(this.e("Longpoll is closing itself"),this.Mb(),this.T&&(this.T(this.pb),this.T=null))};h.close=function(){this.Ma||(this.e("Longpoll is being closed."),this.Mb())};
+h.send=function(a){a=u(a);yc(this.aa,"bytes_sent",a.length);a=ra(a);a=Jb(a,!0);a=Yb(a,1840);for(var b=0;b<a.length;b++){var c=this.ma;c.Gb.push({ae:this.dd,fe:a.length,fd:a[b]});c.vc&&Sc(c);this.dd++}};
+function Qc(a,b,c,d){this.Qb=d;this.ja=c;this.Rc=new Mc;this.Gb=[];this.Bc=Math.floor(1E8*Math.random());this.oc=!0;this.sc=Kb();window["pLPCommand"+this.sc]=a;window["pRTLPCB"+this.sc]=b;a=document.createElement("iframe");a.style.display="none";if(document.body){document.body.appendChild(a);try{a.contentWindow.document||K("No IE domain setting required")}catch(e){a.src="javascript:void((function(){document.open();document.domain='"+document.domain+"';document.close();})())"}}else throw"Document body has not initialized. Wait to initialize Firebase until after the document is ready.";
+a.contentDocument?a.Ba=a.contentDocument:a.contentWindow?a.Ba=a.contentWindow.document:a.document&&(a.Ba=a.document);this.Z=a;a="";this.Z.src&&"javascript:"===this.Z.src.substr(0,11)&&(a='<script>document.domain="'+document.domain+'";\x3c/script>');a="<html><body>"+a+"</body></html>";try{this.Z.Ba.open(),this.Z.Ba.write(a),this.Z.Ba.close()}catch(f){K("frame writing exception"),f.stack&&K(f.stack),K(f)}}
+Qc.prototype.close=function(){this.vc=!1;if(this.Z){this.Z.Ba.body.innerHTML="";var a=this;setTimeout(function(){null!==a.Z&&(document.body.removeChild(a.Z),a.Z=null)},0)}var b=this.ja;b&&(this.ja=null,b())};
+function Sc(a){if(a.vc&&a.oc&&a.Rc.count()<(0<a.Gb.length?2:1)){a.Bc++;var b={};b.id=a.Rd;b.pw=a.Sd;b.ser=a.Bc;for(var b=a.Qb(b),c="",d=0;0<a.Gb.length;)if(1870>=a.Gb[0].fd.length+30+c.length){var e=a.Gb.shift(),c=c+"&seg"+d+"="+e.ae+"&ts"+d+"="+e.fe+"&d"+d+"="+e.fd;d++}else break;Vc(a,b+c,a.Bc);return!0}return!1}function Vc(a,b,c){function d(){a.Rc.remove(c);Sc(a)}a.Rc.add(c);var e=setTimeout(d,25E3);Rc(a,b,function(){clearTimeout(e);d()})}
+function Rc(a,b,c){setTimeout(function(){try{if(a.oc){var d=a.Z.Ba.createElement("script");d.type="text/javascript";d.async=!0;d.src=b;d.onload=d.onreadystatechange=function(){var a=d.readyState;a&&"loaded"!==a&&"complete"!==a||(d.onload=d.onreadystatechange=null,d.parentNode&&d.parentNode.removeChild(d),c())};d.onerror=function(){K("Long-poll script failed to load: "+b);a.oc=!1;a.close()};a.Z.Ba.body.appendChild(d)}}catch(e){}},1)};function Wc(a){Xc(this,a)}var Yc=[Nc,Q];function Xc(a,b){var c=Q&&Q.isAvailable(),d=c&&!(mb.nd||!0===mb.get("previous_websocket_failure"));b.ge&&(c||L("wss:// URL used, but browser isn't known to support websockets.  Trying anyway."),d=!0);if(d)a.Nb=[Q];else{var e=a.Nb=[];Zb(Yc,function(a,b){b&&b.isAvailable()&&e.push(b)})}}function Zc(a){if(0<a.Nb.length)return a.Nb[0];throw Error("No transports available");};function $c(a,b,c,d,e,f){this.id=a;this.e=Qb("c:"+this.id+":");this.Pc=c;this.Bb=d;this.T=e;this.Oc=f;this.N=b;this.fc=[];this.cd=0;this.Ad=new Wc(b);this.na=0;this.e("Connection created");ad(this)}
+function ad(a){var b=Zc(a.Ad);a.K=new b("c:"+a.id+":"+a.cd++,a.N);a.Tc=b.responsesRequiredToBeHealthy||0;var c=bd(a,a.K),d=cd(a,a.K);a.Ob=a.K;a.Lb=a.K;a.w=null;a.ab=!1;setTimeout(function(){a.K&&a.K.open(c,d)},0);b=b.healthyTimeout||0;0<b&&(a.Vb=setTimeout(function(){a.Vb=null;a.ab||(a.e("Closing unhealthy connection after timeout."),a.close())},b))}
+function cd(a,b){return function(c){b===a.K?(a.K=null,c||0!==a.na?1===a.na&&a.e("Realtime connection lost."):(a.e("Realtime connection failed."),"s-"===a.N.ha.substr(0,2)&&(mb.remove("host:"+a.N.host),a.N.ha=a.N.host)),a.close()):b===a.w?(a.e("Secondary connection lost."),c=a.w,a.w=null,a.Ob!==c&&a.Lb!==c||a.close()):a.e("closing an old connection")}}
+function bd(a,b){return function(c){if(2!=a.na)if(b===a.Lb){var d=Xb("t",c);c=Xb("d",c);if("c"==d){if(d=Xb("t",c),"d"in c)if(c=c.d,"h"===d){var d=c.ts,e=c.v,f=c.h;a.pc=c.s;pb(a.N,f);0==a.na&&(a.K.start(),dd(a,a.K,d),"5"!==e&&L("Protocol version mismatch detected"),c=a.Ad,(c=1<c.Nb.length?c.Nb[1]:null)&&ed(a,c))}else if("n"===d){a.e("recvd end transmission on primary");a.Lb=a.w;for(c=0;c<a.fc.length;++c)a.cc(a.fc[c]);a.fc=[];fd(a)}else"s"===d?(a.e("Connection shutdown command received. Shutting down..."),
+a.Oc&&(a.Oc(c),a.Oc=null),a.T=null,a.close()):"r"===d?(a.e("Reset packet received.  New host: "+c),pb(a.N,c),1===a.na?a.close():(gd(a),ad(a))):"e"===d?Rb("Server Error: "+c):"o"===d?(a.e("got pong on primary."),hd(a),id(a)):Rb("Unknown control packet command: "+d)}else"d"==d&&a.cc(c)}else if(b===a.w)if(d=Xb("t",c),c=Xb("d",c),"c"==d)"t"in c&&(c=c.t,"a"===c?jd(a):"r"===c?(a.e("Got a reset on secondary, closing it"),a.w.close(),a.Ob!==a.w&&a.Lb!==a.w||a.close()):"o"===c&&(a.e("got pong on secondary."),
+a.wd--,jd(a)));else if("d"==d)a.fc.push(c);else throw Error("Unknown protocol layer: "+d);else a.e("message on old connection")}}$c.prototype.xd=function(a){kd(this,{t:"d",d:a})};function fd(a){a.Ob===a.w&&a.Lb===a.w&&(a.e("cleaning up and promoting a connection: "+a.w.Ac),a.K=a.w,a.w=null)}
+function jd(a){0>=a.wd?(a.e("Secondary connection is healthy."),a.ab=!0,a.w.Lc(),a.w.start(),a.e("sending client ack on secondary"),a.w.send({t:"c",d:{t:"a",d:{}}}),a.e("Ending transmission on primary"),a.K.send({t:"c",d:{t:"n",d:{}}}),a.Ob=a.w,fd(a)):(a.e("sending ping on secondary."),a.w.send({t:"c",d:{t:"p",d:{}}}))}$c.prototype.cc=function(a){hd(this);this.Pc(a)};function hd(a){a.ab||(a.Tc--,0>=a.Tc&&(a.e("Primary connection is healthy."),a.ab=!0,a.K.Lc()))}
+function ed(a,b){a.w=new b("c:"+a.id+":"+a.cd++,a.N,a.pc);a.wd=b.responsesRequiredToBeHealthy||0;a.w.open(bd(a,a.w),cd(a,a.w));setTimeout(function(){a.w&&(a.e("Timed out trying to upgrade."),a.w.close())},6E4)}function dd(a,b,c){a.e("Realtime connection established.");a.K=b;a.na=1;a.Bb&&(a.Bb(c),a.Bb=null);0===a.Tc?(a.e("Primary connection is healthy."),a.ab=!0):setTimeout(function(){id(a)},5E3)}function id(a){a.ab||1!==a.na||(a.e("sending ping on primary."),kd(a,{t:"c",d:{t:"p",d:{}}}))}
+function kd(a,b){if(1!==a.na)throw"Connection is not connected";a.Ob.send(b)}$c.prototype.close=function(){2!==this.na&&(this.e("Closing realtime connection."),this.na=2,gd(this),this.T&&(this.T(),this.T=null))};function gd(a){a.e("Shutting down all connections");a.K&&(a.K.close(),a.K=null);a.w&&(a.w.close(),a.w=null);a.Vb&&(clearTimeout(a.Vb),a.Vb=null)};function ld(a,b,c,d,e,f){this.id=md++;this.e=Qb("p:"+this.id+":");this.Ra=!0;this.ia={};this.U=[];this.Db=0;this.Ab=[];this.S=!1;this.ua=1E3;this.Xb=3E5;this.dc=b||ba;this.bc=c||ba;this.zb=d||ba;this.Qc=e||ba;this.Gc=f||ba;this.N=a;this.Vc=null;this.Kb={};this.$d=0;this.vb=this.Kc=null;nd(this,0);tc.rb().fb("visible",this.Vd,this);-1===a.host.indexOf("fblocal")&&uc.rb().fb("online",this.Ud,this)}var md=0,od=0;h=ld.prototype;
+h.Ga=function(a,b,c){var d=++this.$d;a={r:d,a:a,b:b};this.e(u(a));v(this.S,"sendRequest_ call when we're not connected not allowed.");this.la.xd(a);c&&(this.Kb[d]=c)};function pd(a,b,c){var d=b.toString(),e=b.path().toString();a.ia[e]=a.ia[e]||{};v(!a.ia[e][d],"listen() called twice for same path/queryId.");a.ia[e][d]={hb:b.hb(),D:c};a.S&&qd(a,e,d,b.hb(),c)}
+function qd(a,b,c,d,e){a.e("Listen on "+b+" for "+c);var f={p:b};d=vb(d,function(a){return Ja(a)});"{}"!==c&&(f.q=d);f.h=a.Gc(b);a.Ga("l",f,function(d){a.e("listen response",d);d=d.s;"ok"!==d&&rd(a,b,c);e&&e(d)})}
+h.mb=function(a,b,c){this.Ka={Id:a,gd:!1,ba:b,Sb:c};this.e("Authenticating using credential: "+this.Ka);sd(this);if(!(b=40==a.length))a:{var d;try{var e=a.split(".");if(3!==e.length){b=!1;break a}var f;b:{try{if("undefined"!==typeof atob){f=atob(e[1]);break b}}catch(g){K("base64DecodeIfNativeSupport failed: ",g)}f=null}null!==f&&(d=qa(f))}catch(k){K("isAdminAuthToken_ failed",k)}b="object"===typeof d&&!0===va(d,"admin")}b&&(this.e("Admin auth credential detected.  Reducing max reconnect time."),this.Xb=
+3E4)};h.Pb=function(a){delete this.Ka;this.zb(!1);this.S&&this.Ga("unauth",{},function(b){a(b.s,b.d)})};function sd(a){var b=a.Ka;a.S&&b&&a.Ga("auth",{cred:b.Id},function(c){var d=c.s;c=c.d||"error";"ok"!==d&&a.Ka===b&&delete a.Ka;a.zb("ok"===d);b.gd?"ok"!==d&&b.Sb&&b.Sb(d,c):(b.gd=!0,b.ba&&b.ba(d,c))})}function td(a,b,c,d){b=b.toString();rd(a,b,c)&&a.S&&ud(a,b,c,d)}function ud(a,b,c,d){a.e("Unlisten on "+b+" for "+c);b={p:b};d=vb(d,function(a){return Ja(a)});"{}"!==c&&(b.q=d);a.Ga("u",b)}
+function vd(a,b,c,d){a.S?wd(a,"o",b,c,d):a.Ab.push({Sc:b,action:"o",data:c,D:d})}function xd(a,b,c,d){a.S?wd(a,"om",b,c,d):a.Ab.push({Sc:b,action:"om",data:c,D:d})}h.Nc=function(a,b){this.S?wd(this,"oc",a,null,b):this.Ab.push({Sc:a,action:"oc",data:null,D:b})};function wd(a,b,c,d,e){c={p:c,d:d};a.e("onDisconnect "+b,c);a.Ga(b,c,function(a){e&&setTimeout(function(){e(a.s,a.d)},0)})}h.put=function(a,b,c,d){yd(this,"p",a,b,c,d)};function zd(a,b,c,d){yd(a,"m",b,c,d,void 0)}
+function yd(a,b,c,d,e,f){c={p:c,d:d};n(f)&&(c.h=f);a.U.push({action:b,td:c,D:e});a.Db++;b=a.U.length-1;a.S&&Ad(a,b)}function Ad(a,b){var c=a.U[b].action,d=a.U[b].td,e=a.U[b].D;a.U[b].Xd=a.S;a.Ga(c,d,function(d){a.e(c+" response",d);delete a.U[b];a.Db--;0===a.Db&&(a.U=[]);e&&e(d.s,d.d)})}
+h.cc=function(a){if("r"in a){this.e("from server: "+u(a));var b=a.r,c=this.Kb[b];c&&(delete this.Kb[b],c(a.b))}else{if("error"in a)throw"A server-side error has occurred: "+a.error;"a"in a&&(b=a.a,c=a.b,this.e("handleServerMessage",b,c),"d"===b?this.dc(c.p,c.d,!1):"m"===b?this.dc(c.p,c.d,!0):"c"===b?Bd(this,c.p,c.q):"ac"===b?(a=c.s,b=c.d,c=this.Ka,delete this.Ka,c&&c.Sb&&c.Sb(a,b),this.zb(!1)):"sd"===b?this.Vc?this.Vc(c):"msg"in c&&"undefined"!==typeof console&&console.log("FIREBASE: "+c.msg.replace("\n",
+"\nFIREBASE: ")):Rb("Unrecognized action received from server: "+u(b)+"\nAre you using the latest client?"))}};h.Bb=function(a){this.e("connection ready");this.S=!0;this.vb=(new Date).getTime();this.Qc({serverTimeOffset:a-(new Date).getTime()});sd(this);for(var b in this.ia)for(var c in this.ia[b])a=this.ia[b][c],qd(this,b,c,a.hb,a.D);for(b=0;b<this.U.length;b++)this.U[b]&&Ad(this,b);for(;this.Ab.length;)b=this.Ab.shift(),wd(this,b.action,b.Sc,b.data,b.D);this.bc(!0)};
+function nd(a,b){v(!a.la,"Scheduling a connect when we're already connected/ing?");a.Xa&&clearTimeout(a.Xa);a.Xa=setTimeout(function(){a.Xa=null;Cd(a)},b)}h.Vd=function(a){a&&!this.lb&&this.ua===this.Xb&&(this.e("Window became visible.  Reducing delay."),this.ua=1E3,this.la||nd(this,0));this.lb=a};h.Ud=function(a){a?(this.e("Browser went online.  Reconnecting."),this.ua=1E3,this.Ra=!0,this.la||nd(this,0)):(this.e("Browser went offline.  Killing connection; don't reconnect."),this.Ra=!1,this.la&&this.la.close())};
+h.pd=function(){this.e("data client disconnected");this.S=!1;this.la=null;for(var a=0;a<this.U.length;a++){var b=this.U[a];b&&"h"in b.td&&b.Xd&&(b.D&&b.D("disconnect"),delete this.U[a],this.Db--)}0===this.Db&&(this.U=[]);if(this.Ra)this.lb?this.vb&&(3E4<(new Date).getTime()-this.vb&&(this.ua=1E3),this.vb=null):(this.e("Window isn't visible.  Delaying reconnect."),this.ua=this.Xb,this.Kc=(new Date).getTime()),a=Math.max(0,this.ua-((new Date).getTime()-this.Kc)),a*=Math.random(),this.e("Trying to reconnect in "+
+a+"ms"),nd(this,a),this.ua=Math.min(this.Xb,1.3*this.ua);else for(var c in this.Kb)delete this.Kb[c];this.bc(!1)};function Cd(a){if(a.Ra){a.e("Making a connection attempt");a.Kc=(new Date).getTime();a.vb=null;var b=r(a.cc,a),c=r(a.Bb,a),d=r(a.pd,a),e=a.id+":"+od++;a.la=new $c(e,a.N,b,c,d,function(b){L(b+" ("+a.N.toString()+")");a.Ra=!1})}}h.La=function(){this.Ra=!1;this.la?this.la.close():(this.Xa&&(clearTimeout(this.Xa),this.Xa=null),this.S&&this.pd())};
+h.jb=function(){this.Ra=!0;this.ua=1E3;this.S||nd(this,0)};function Bd(a,b,c){c=c?vb(c,function(a){return Ka(a)}).join("$"):"{}";(a=rd(a,b,c))&&a.D&&a.D("permission_denied")}function rd(a,b,c){b=(new F(b)).toString();c||(c="{}");var d=a.ia[b][c];delete a.ia[b][c];return d};function Dd(){this.o=this.F=null}function Ed(a,b,c){if(b.f())a.F=c,a.o=null;else if(null!==a.F)a.F=a.F.Aa(b,c);else{null==a.o&&(a.o=new Mc);var d=C(b);a.o.contains(d)||a.o.add(d,new Dd);a=a.o.get(d);b=La(b);Ed(a,b,c)}}function Fd(a,b){if(b.f())return a.F=null,a.o=null,!0;if(null!==a.F){if(a.F.P())return!1;var c=a.F;a.F=null;c.A(function(b,c){Ed(a,new F(b),c)});return Fd(a,b)}return null!==a.o?(c=C(b),b=La(b),a.o.contains(c)&&Fd(a.o.get(c),b)&&a.o.remove(c),a.o.f()?(a.o=null,!0):!1):!0}
+function Gd(a,b,c){null!==a.F?c(b,a.F):a.A(function(a,e){var f=new F(b.toString()+"/"+a);Gd(e,f,c)})}Dd.prototype.A=function(a){null!==this.o&&R(this.o,function(b,c){a(b,c)})};function Hd(){this.$=M}function S(a,b){return a.$.L(b)}function T(a,b,c){a.$=a.$.Aa(b,c)}Hd.prototype.toString=function(){return this.$.toString()};function Id(){this.va=new Hd;this.M=new Hd;this.pa=new Hd;this.Fb=new Pa}function Jd(a,b,c){T(a.va,b,c);return Kd(a,b)}function Kd(a,b){for(var c=S(a.va,b),d=S(a.M,b),e=I(a.Fb,b),f=!1,g=e;null!==g;){if(null!==g.j()){f=!0;break}g=g.parent()}if(f)return!1;c=Ld(c,d,e);return c!==d?(T(a.M,b,c),!0):!1}function Ld(a,b,c){if(c.f())return a;if(null!==c.j())return b;a=a||M;c.A(function(d){d=d.name();var e=a.O(d),f=b.O(d),g=I(c,d),e=Ld(e,f,g);a=a.H(d,e)});return a}
+Id.prototype.set=function(a,b){var c=this,d=[];ub(b,function(a){var b=a.path;a=a.ta;var g=Kb();J(I(c.Fb,b),g);T(c.M,b,a);d.push({path:b,be:g})});return d};function Md(a,b){ub(b,function(b){var d=b.be;b=I(a.Fb,b.path);var e=b.j();v(null!==e,"pendingPut should not be null.");e===d&&J(b,null)})};function Nd(a,b){return a&&"object"===typeof a?(v(".sv"in a,"Unexpected leaf node or priority contents"),b[a[".sv"]]):a}function Od(a,b){var c=new Dd;Gd(a,new F(""),function(a,e){Ed(c,a,Pd(e,b))});return c}function Pd(a,b){var c=Nd(a.k(),b),d;if(a.P()){var e=Nd(a.j(),b);return e!==a.j()||c!==a.k()?new fc(e,c):a}d=a;c!==a.k()&&(d=d.Ia(c));a.A(function(a,c){var e=Pd(c,b);e!==c&&(d=d.H(a,e))});return d};function Qd(){this.Ya=[]}function Rd(a,b){if(0!==b.length)for(var c=0;c<b.length;c++)a.Ya.push(b[c])}Qd.prototype.Ib=function(){for(var a=0;a<this.Ya.length;a++)if(this.Ya[a]){var b=this.Ya[a];this.Ya[a]=null;Sd(b)}this.Ya=[]};function Sd(a){var b=a.ba,c=a.yd,d=a.Hb;ec(function(){b(c,d)})};function U(a,b,c,d){this.type=a;this.wa=b;this.ca=c;this.Hb=d};function Td(a){this.R=a;this.ra=[];this.Dc=new Qd}function Ud(a,b,c,d,e){a.ra.push({type:b,ba:c,cancel:d,Y:e});d=[];var f=Vd(a.i);a.tb&&f.push(new U("value",a.i));for(var g=0;g<f.length;g++)if(f[g].type===b){var k=new E(a.R.m,a.R.path);f[g].ca&&(k=k.G(f[g].ca));d.push({ba:ac(c,e),yd:new P(f[g].wa,k),Hb:f[g].Hb})}Rd(a.Dc,d)}Td.prototype.ic=function(a,b){b=this.jc(a,b);null!=b&&Wd(this,b)};
+function Wd(a,b){for(var c=[],d=0;d<b.length;d++){var e=b[d],f=e.type,g=new E(a.R.m,a.R.path);b[d].ca&&(g=g.G(b[d].ca));g=new P(b[d].wa,g);"value"!==e.type||g.sb()?"value"!==e.type&&(f+=" "+g.name()):f+="("+g.V()+")";K(a.R.m.u.id+": event:"+a.R.path+":"+a.R.Pa()+":"+f);for(f=0;f<a.ra.length;f++){var k=a.ra[f];b[d].type===k.type&&c.push({ba:ac(k.ba,k.Y),yd:g,Hb:e.Hb})}}Rd(a.Dc,c)}Td.prototype.Ib=function(){this.Dc.Ib()};
+function Vd(a){var b=[];if(!a.P()){var c=null;a.A(function(a,e){b.push(new U("child_added",e,a,c));c=a})}return b}function Xd(a){a.tb||(a.tb=!0,Wd(a,[new U("value",a.i)]))};function Yd(a,b){Td.call(this,a);this.i=b}ja(Yd,Td);Yd.prototype.jc=function(a,b){this.i=a;this.tb&&null!=b&&b.push(new U("value",this.i));return b};Yd.prototype.qb=function(){return{}};function Zd(a,b){this.Tb=a;this.Mc=b}function $d(a,b,c,d,e){var f=a.L(c),g=b.L(c);d=new Zd(d,e);e=ae(d,c,f,g);g=!f.f()&&!g.f()&&f.k()!==g.k();if(e||g)for(f=c,c=e;null!==f.parent();){var k=a.L(f);e=b.L(f);var l=f.parent();if(!d.Tb||I(d.Tb,l).j()){var m=b.L(l),p=[],f=Ma(f);k.f()?(k=m.ga(f,e),p.push(new U("child_added",e,f,k))):e.f()?p.push(new U("child_removed",k,f)):(k=m.ga(f,e),g&&p.push(new U("child_moved",e,f,k)),c&&p.push(new U("child_changed",e,f,k)));d.Mc(l,m,p)}g&&(g=!1,c=!0);f=l}}
+function ae(a,b,c,d){var e,f=[];c===d?e=!1:c.P()&&d.P()?e=c.j()!==d.j():c.P()?(be(a,b,M,d,f),e=!0):d.P()?(be(a,b,c,M,f),e=!0):e=be(a,b,c,d,f);e?a.Mc(b,d,f):c.k()!==d.k()&&a.Mc(b,d,null);return e}
+function be(a,b,c,d,e){var f=!1,g=!a.Tb||!I(a.Tb,b).f(),k=[],l=[],m=[],p=[],t={},s={},w,V,G,H;w=c.Za();G=Ya(w);V=d.Za();for(H=Ya(V);null!==G||null!==H;){c=H;c=null===G?1:null===c?-1:G.key===c.key?0:ic({name:G.key,ka:G.value.k()},{name:c.key,ka:c.value.k()});if(0>c)f=va(t,G.key),n(f)?(m.push({Fc:G,$c:k[f]}),k[f]=null):(s[G.key]=l.length,l.push(G)),f=!0,G=Ya(w);else{if(0<c)f=va(s,H.key),n(f)?(m.push({Fc:l[f],$c:H}),l[f]=null):(t[H.key]=k.length,k.push(H)),f=!0;else{c=b.G(H.key);if(c=ae(a,c,G.value,
+H.value))p.push(H),f=!0;G.value.k()!==H.value.k()&&(m.push({Fc:G,$c:H}),f=!0);G=Ya(w)}H=Ya(V)}if(!g&&f)return!0}for(g=0;g<l.length;g++)if(t=l[g])c=b.G(t.key),ae(a,c,t.value,M),e.push(new U("child_removed",t.value,t.key));for(g=0;g<k.length;g++)if(t=k[g])c=b.G(t.key),l=d.ga(t.key,t.value),ae(a,c,M,t.value),e.push(new U("child_added",t.value,t.key,l));for(g=0;g<m.length;g++)t=m[g].Fc,k=m[g].$c,c=b.G(k.key),l=d.ga(k.key,k.value),e.push(new U("child_moved",k.value,k.key,l)),(c=ae(a,c,t.value,k.value))&&
+p.push(k);for(g=0;g<p.length;g++)a=p[g],l=d.ga(a.key,a.value),e.push(new U("child_changed",a.value,a.key,l));return f};function ce(){this.X=this.za=null;this.set={}}ja(ce,Mc);h=ce.prototype;h.setActive=function(a){this.za=a};function de(a,b,c){a.add(b,c);a.X||(a.X=c.R.path)}function ee(a){var b=a.za;a.za=null;return b}function fe(a){return a.contains("default")}function ge(a){return null!=a.za&&fe(a)}h.defaultView=function(){return fe(this)?this.get("default"):null};h.path=function(){return this.X};h.toString=function(){return vb(this.keys(),function(a){return"default"===a?"{}":a}).join("$")};
+h.hb=function(){var a=[];R(this,function(b,c){a.push(c.R)});return a};function he(a,b){Td.call(this,a);this.i=M;this.jc(b,Vd(b))}ja(he,Td);
+he.prototype.jc=function(a,b){if(null===b)return b;var c=[],d=this.R;n(d.fa)&&(n(d.ya)&&null!=d.ya?c.push(function(a,b){var c=Ub(b,d.fa);return 0<c||0===c&&0<=Vb(a,d.ya)}):c.push(function(a,b){return 0<=Ub(b,d.fa)}));n(d.Ca)&&(n(d.Wa)?c.push(function(a,b){var c=Ub(b,d.Ca);return 0>c||0===c&&0>=Vb(a,d.Wa)}):c.push(function(a,b){return 0>=Ub(b,d.Ca)}));var e=null,f=null;if(n(this.R.Ea))if(n(this.R.fa)){if(e=ie(a,c,this.R.Ea,!1)){var g=a.O(e).k();c.push(function(a,b){var c=Ub(b,g);return 0>c||0===c&&
+0>=Vb(a,e)})}}else if(f=ie(a,c,this.R.Ea,!0)){var k=a.O(f).k();c.push(function(a,b){var c=Ub(b,k);return 0<c||0===c&&0<=Vb(a,f)})}for(var l=[],m=[],p=[],t=[],s=0;s<b.length;s++){var w=b[s].ca,V=b[s].wa;switch(b[s].type){case "child_added":je(c,w,V)&&(this.i=this.i.H(w,V),m.push(b[s]));break;case "child_removed":this.i.O(w).f()||(this.i=this.i.H(w,null),l.push(b[s]));break;case "child_changed":!this.i.O(w).f()&&je(c,w,V)&&(this.i=this.i.H(w,V),t.push(b[s]));break;case "child_moved":var G=!this.i.O(w).f(),
+H=je(c,w,V);G?H?(this.i=this.i.H(w,V),p.push(b[s])):(l.push(new U("child_removed",this.i.O(w),w)),this.i=this.i.H(w,null)):H&&(this.i=this.i.H(w,V),m.push(b[s]))}}var Tc=e||f;if(Tc){var Uc=(s=null!==f)?this.i.hd():this.i.kd(),hc=!1,$a=!1,ab=this;(s?a.Ec:a.A).call(a,function(a,b){$a||null!==Uc||($a=!0);if($a&&hc)return!0;hc?(l.push(new U("child_removed",ab.i.O(a),a)),ab.i=ab.i.H(a,null)):$a&&(m.push(new U("child_added",b,a)),ab.i=ab.i.H(a,b));Uc===a&&($a=!0);a===Tc&&(hc=!0)})}for(s=0;s<m.length;s++)c=
+m[s],w=this.i.ga(c.ca,c.wa),l.push(new U("child_added",c.wa,c.ca,w));for(s=0;s<p.length;s++)c=p[s],w=this.i.ga(c.ca,c.wa),l.push(new U("child_moved",c.wa,c.ca,w));for(s=0;s<t.length;s++)c=t[s],w=this.i.ga(c.ca,c.wa),l.push(new U("child_changed",c.wa,c.ca,w));this.tb&&0<l.length&&l.push(new U("value",this.i));return l};function ie(a,b,c,d){if(a.P())return null;var e=null;(d?a.Ec:a.A).call(a,function(a,d){if(je(b,a,d)&&(e=a,c--,0===c))return!0});return e}
+function je(a,b,c){for(var d=0;d<a.length;d++)if(!a[d](b,c.k()))return!1;return!0}he.prototype.Hc=function(a){return this.i.O(a)!==M};
+he.prototype.qb=function(a,b,c){var d={};this.i.P()||this.i.A(function(a){d[a]=3});var e=this.i;c=S(c,new F(""));var f=new Pa;J(I(f,this.R.path),!0);b=M.Aa(a,b);var g=this;$d(c,b,a,f,function(a,b,c){null!==c&&a.toString()===g.R.path.toString()&&g.jc(b,c)});this.i.P()?$b(d,function(a,b){d[b]=2}):(this.i.A(function(a){A(d,a)||(d[a]=1)}),$b(d,function(a,b){g.i.O(b).f()&&(d[b]=2)}));this.i=e;return d};function ke(a,b){this.u=a;this.g=b;this.ac=b.$;this.oa=new Pa}ke.prototype.Rb=function(a,b,c,d,e){var f=a.path,g=I(this.oa,f),k=g.j();null===k?(k=new ce,J(g,k)):v(!k.f(),"We shouldn't be storing empty QueryMaps");var l=a.Pa();if(k.contains(l))a=k.get(l),Ud(a,b,c,d,e);else{var m=this.g.$.L(f);a=le(a,m);me(this,g,k,l,a);Ud(a,b,c,d,e);(b=(b=Sa(I(this.oa,f),function(a){var b;if(b=a.j()&&a.j().defaultView())b=a.j().defaultView().tb;if(b)return!0},!0))||null===this.u&&!S(this.g,f).f())&&Xd(a)}a.Ib()};
+function ne(a,b,c,d,e){var f=a.get(b),g;if(g=f){g=!1;for(var k=f.ra.length-1;0<=k;k--){var l=f.ra[k];if(!(c&&l.type!==c||d&&l.ba!==d||e&&l.Y!==e)&&(f.ra.splice(k,1),g=!0,c&&d))break}}(c=g&&!(0<f.ra.length))&&a.remove(b);return c}function oe(a,b,c,d,e){b=b?b.Pa():null;var f=[];b&&"default"!==b?ne(a,b,c,d,e)&&f.push(b):ub(a.keys(),function(b){ne(a,b,c,d,e)&&f.push(b)});return f}ke.prototype.lc=function(a,b,c,d){var e=I(this.oa,a.path).j();return null===e?null:pe(this,e,a,b,c,d)};
+function pe(a,b,c,d,e,f){var g=b.path(),g=I(a.oa,g);c=oe(b,c,d,e,f);b.f()&&J(g,null);d=qe(g);if(0<c.length&&!d){d=g;e=g.parent();for(c=!1;!c&&e;){if(f=e.j()){v(!ge(f));var k=d.name(),l=!1;R(f,function(a,b){l=b.Hc(k)||l});l&&(c=!0)}d=e;e=e.parent()}d=null;ge(b)||(b=ee(b),d=re(a,g),b&&b());return c?null:d}return null}function se(a,b,c){Ra(I(a.oa,b),function(a){(a=a.j())&&R(a,function(a,b){Xd(b)})},c,!0)}
+function W(a,b,c){function d(a){do{if(g[a.toString()])return!0;a=a.parent()}while(null!==a);return!1}var e=a.ac,f=a.g.$;a.ac=f;for(var g={},k=0;k<c.length;k++)g[c[k].toString()]=!0;$d(e,f,b,a.oa,function(c,e,f){if(b.contains(c)){var g=d(c);g&&se(a,c,!1);a.ic(c,e,f);g&&se(a,c,!0)}else a.ic(c,e,f)});d(b)&&se(a,b,!0);te(a,b)}function te(a,b){var c=I(a.oa,b);Ra(c,function(a){(a=a.j())&&R(a,function(a,b){b.Ib()})},!0,!0);Sa(c,function(a){(a=a.j())&&R(a,function(a,b){b.Ib()})},!1)}
+ke.prototype.ic=function(a,b,c){a=I(this.oa,a).j();null!==a&&R(a,function(a,e){e.ic(b,c)})};function qe(a){return Sa(a,function(a){return a.j()&&ge(a.j())})}function me(a,b,c,d,e){if(ge(c)||qe(b))de(c,d,e);else{var f,g;c.f()||(f=c.toString(),g=c.hb());de(c,d,e);c.setActive(ue(a,c));f&&g&&td(a.u,c.path(),f,g)}ge(c)&&Ra(b,function(a){if(a=a.j())a.za&&a.za(),a.za=null})}
+function re(a,b){function c(b){var f=b.j();if(f&&fe(f))d.push(f.path()),null==f.za&&f.setActive(ue(a,f));else{if(f){null!=f.za||f.setActive(ue(a,f));var g={};R(f,function(a,b){b.i.A(function(a){A(g,a)||(g[a]=!0,a=f.path().G(a),d.push(a))})})}b.A(c)}}var d=[];c(b);return d}
+function ue(a,b){if(a.u){var c=a.u,d=b.path(),e=b.toString(),f=b.hb(),g,k=b.keys(),l=fe(b);pd(a.u,b,function(c){"ok"!==c?(c=cc(c),L("on() or once() for "+b.path().toString()+" failed: "+c.toString()),ve(a,b,c)):g||(l?se(a,b.path(),!0):ub(k,function(a){(a=b.get(a))&&Xd(a)}),te(a,b.path()))});return function(){g=!0;td(c,d,e,f)}}return ba}function ve(a,b,c){b&&(R(b,function(a,b){for(var f=0;f<b.ra.length;f++){var g=b.ra[f];g.cancel&&ac(g.cancel,g.Y)(c)}}),pe(a,b))}
+function le(a,b){return"default"===a.Pa()?new Yd(a,b):new he(a,b)}ke.prototype.qb=function(a,b,c,d){function e(a){$b(a,function(a,b){f[b]=3===a?3:(va(f,b)||a)===a?a:3})}var f={};R(b,function(b,f){e(f.qb(a,c,d))});c.P()||c.A(function(a){A(f,a)||(f[a]=4)});return f};function we(a,b,c,d,e){var f=b.path();b=a.qb(f,b,d,e);var g=M,k=[];$b(b,function(b,m){var p=new F(m);3===b||1===b?g=g.H(m,d.L(p)):(2===b&&k.push({path:f.G(m),ta:M}),k=k.concat(xe(a,d.L(p),I(c,p),e)))});return[{path:f,ta:g}].concat(k)}
+function ye(a,b,c,d){var e;a:{var f=I(a.oa,b);e=f.parent();for(var g=[];null!==e;){var k=e.j();if(null!==k){if(fe(k)){e=[{path:b,ta:c}];break a}k=a.qb(b,k,c,d);f=va(k,f.name());if(3===f||1===f){e=[{path:b,ta:c}];break a}2===f&&g.push({path:b,ta:M})}f=e;e=e.parent()}e=g}if(1==e.length&&(!e[0].ta.f()||c.f()))return e;g=I(a.oa,b);f=g.j();null!==f?fe(f)?e.push({path:b,ta:c}):e=e.concat(we(a,f,g,c,d)):e=e.concat(xe(a,c,g,d));return e}
+function xe(a,b,c,d){var e=c.j();if(null!==e)return fe(e)?[{path:c.path(),ta:b}]:we(a,e,c,b,d);var f=[];c.A(function(c){var e=b.P()?M:b.O(c.name());c=xe(a,e,c,d);f=f.concat(c)});return f};function ze(a){this.N=a;this.aa=Dc(a);this.u=new ld(this.N,r(this.dc,this),r(this.bc,this),r(this.zb,this),r(this.Qc,this),r(this.Gc,this));this.zd=Ec(a,r(function(){return new Ac(this.aa,this.u)},this));this.Sa=new Pa;this.Ha=new Hd;this.g=new Id;this.I=new ke(this.u,this.g.pa);this.Ic=new Hd;this.Jc=new ke(null,this.Ic);Ae(this,"connected",!1);Ae(this,"authenticated",!1);this.T=new Dd;this.Cc=0}h=ze.prototype;h.toString=function(){return(this.N.nc?"https://":"http://")+this.N.host};h.name=function(){return this.N.Yb};
+function Be(a){a=S(a.Ic,new F(".info/serverTimeOffset")).V()||0;return(new Date).getTime()+a}function Ce(a){a=a={timestamp:Be(a)};a.timestamp=a.timestamp||(new Date).getTime();return a}
+h.dc=function(a,b,c){this.Cc++;this.md&&(b=this.md(a,b));var d,e,f=[];9<=a.length&&a.lastIndexOf(".priority")===a.length-9?(d=new F(a.substring(0,a.length-9)),e=S(this.g.va,d).Ia(b),f.push(d)):c?(d=new F(a),e=S(this.g.va,d),$b(b,function(a,b){var c=new F(b);".priority"===b?e=e.Ia(a):(e=e.Aa(c,O(a)),f.push(d.G(b)))})):(d=new F(a),e=O(b),f.push(d));a=ye(this.I,d,e,this.g.M);b=!1;for(c=0;c<a.length;++c){var g=a[c];b=Jd(this.g,g.path,g.ta)||b}b&&(d=De(this,d));W(this.I,d,f)};
+h.bc=function(a){Ae(this,"connected",a);!1===a&&Ee(this)};h.Qc=function(a){var b=this;Zb(a,function(a,d){Ae(b,d,a)})};h.Gc=function(a){a=new F(a);return S(this.g.va,a).hash()};h.zb=function(a){Ae(this,"authenticated",a)};function Ae(a,b,c){b=new F("/.info/"+b);T(a.Ic,b,O(c));W(a.Jc,b,[b])}
+h.mb=function(a,b,c){"firebaseio-demo.com"===this.N.domain&&L("FirebaseRef.auth() not supported on demo (*.firebaseio-demo.com) Firebases. Please use on production (*.firebaseio.com) Firebases only.");this.u.mb(a,function(a,c){X(b,a,c)},function(a,b){L("auth() was canceled: "+b);if(c){var f=Error(b);f.code=a.toUpperCase();c(f)}})};h.Pb=function(a){this.u.Pb(function(b,c){X(a,b,c)})};
+h.kb=function(a,b,c,d){this.e("set",{path:a.toString(),value:b,ka:c});var e=Ce(this);b=O(b,c);var e=Pd(b,e),e=ye(this.I,a,e,this.g.M),f=this.g.set(a,e),g=this;this.u.put(a.toString(),b.V(!0),function(b,c){"ok"!==b&&L("set at "+a+" failed: "+b);Md(g.g,f);Kd(g.g,a);var e=De(g,a);W(g.I,e,[]);X(d,b,c)});e=Fe(this,a);De(this,e);W(this.I,e,[a])};
+h.update=function(a,b,c){this.e("update",{path:a.toString(),value:b});var d=S(this.g.pa,a),e=!0,f=[],g=Ce(this),k=[],l;for(l in b){var e=!1,m=O(b[l]),m=Pd(m,g),d=d.H(l,m),p=a.G(l);f.push(p);m=ye(this.I,p,m,this.g.M);k=k.concat(this.g.set(a,m))}if(e)K("update() called with empty data.  Don't do anything."),X(c,"ok");else{var t=this;zd(this.u,a.toString(),b,function(b,d){v("ok"===b||"permission_denied"===b,"merge at "+a+" failed.");"ok"!==b&&L("update at "+a+" failed: "+b);Md(t.g,k);Kd(t.g,a);var e=
+De(t,a);W(t.I,e,[]);X(c,b,d)});b=Fe(this,a);De(this,b);W(t.I,b,f)}};h.Wc=function(a,b,c){this.e("setPriority",{path:a.toString(),ka:b});var d=Ce(this),d=Nd(b,d),d=S(this.g.M,a).Ia(d),d=ye(this.I,a,d,this.g.M),e=this.g.set(a,d),f=this;this.u.put(a.toString()+"/.priority",b,function(b,d){"permission_denied"===b&&L("setPriority at "+a+" failed: "+b);Md(f.g,e);Kd(f.g,a);var l=De(f,a);W(f.I,l,[]);X(c,b,d)});b=De(this,a);W(f.I,b,[])};
+function Ee(a){a.e("onDisconnectEvents");var b=[],c=Ce(a);Gd(Od(a.T,c),new F(""),function(c,e){var f=ye(a.I,c,e,a.g.M);b.push.apply(b,a.g.set(c,f));f=Fe(a,c);De(a,f);W(a.I,f,[c])});Md(a.g,b);a.T=new Dd}h.Nc=function(a,b){var c=this;this.u.Nc(a.toString(),function(d,e){"ok"===d&&Fd(c.T,a);X(b,d,e)})};function Ge(a,b,c,d){var e=O(c);vd(a.u,b.toString(),e.V(!0),function(c,g){"ok"===c&&Ed(a.T,b,e);X(d,c,g)})}
+function He(a,b,c,d,e){var f=O(c,d);vd(a.u,b.toString(),f.V(!0),function(c,d){"ok"===c&&Ed(a.T,b,f);X(e,c,d)})}function Ie(a,b,c,d){var e=!0,f;for(f in c)e=!1;e?(K("onDisconnect().update() called with empty data.  Don't do anything."),X(d,"ok")):xd(a.u,b.toString(),c,function(e,f){if("ok"===e)for(var l in c){var m=O(c[l]);Ed(a.T,b.G(l),m)}X(d,e,f)})}function Je(a){yc(a.aa,"deprecated_on_disconnect");a.zd.Zc.deprecated_on_disconnect=!0}
+h.Rb=function(a,b,c,d,e){".info"===C(a.path)?this.Jc.Rb(a,b,c,d,e):this.I.Rb(a,b,c,d,e)};h.lc=function(a,b,c,d){if(".info"===C(a.path))this.Jc.lc(a,b,c,d);else{b=this.I.lc(a,b,c,d);if(c=null!==b){c=this.g;d=a.path;for(var e=[],f=0;f<b.length;++f)e[f]=S(c.va,b[f]);T(c.va,d,M);for(f=0;f<b.length;++f)T(c.va,b[f],e[f]);c=Kd(c,d)}c&&(v(this.g.pa.$===this.I.ac,"We should have raised any outstanding events by now.  Else, we'll blow them away."),T(this.g.pa,a.path,S(this.g.M,a.path)),this.I.ac=this.g.pa.$)}};
+h.La=function(){this.u.La()};h.jb=function(){this.u.jb()};h.Xc=function(a){if("undefined"!==typeof console){a?(this.qc||(this.qc=new zc(this.aa)),a=this.qc.get()):a=this.aa.get();var b=wb(vc(a),function(a,b){return Math.max(b.length,a)},0),c;for(c in a){for(var d=a[c],e=c.length;e<b+2;e++)c+=" ";console.log(c+d)}}};h.Yc=function(a){yc(this.aa,a);this.zd.Zc[a]=!0};h.e=function(){K("r:"+this.u.id+":",arguments)};
+function X(a,b,c){a&&ec(function(){if("ok"==b)a(null,c);else{var d=(b||"error").toUpperCase(),e=d;c&&(e+=": "+c);e=Error(e);e.code=d;a(e)}})};function Ke(a,b,c,d,e){function f(){}a.e("transaction on "+b);var g=new E(a,b);g.fb("value",f);c={path:b,update:c,D:d,status:null,qd:Kb(),wc:e,vd:0,tc:function(){g.yb("value",f)},uc:null};a.Ha.$=Le(a,a.Ha.$,a.g.M.$,a.Sa);d=c.update(S(a.Ha,b).V());if(n(d)){Aa("transaction failed: Data returned ",d);c.status=1;e=I(a.Sa,b);var k=e.j()||[];k.push(c);J(e,k);k="object"===typeof d&&null!==d&&A(d,".priority")?d[".priority"]:S(a.g.M,b).k();e=Ce(a);d=O(d,k);d=Pd(d,e);T(a.Ha,b,d);c.wc&&(T(a.g.pa,b,d),W(a.I,
+b,[b]));Me(a)}else c.tc(),c.D&&(a=Ne(a,b),c.D(null,!1,a))}function Me(a,b){var c=b||a.Sa;b||Oe(a,c);if(null!==c.j()){var d=Pe(a,c);v(0<d.length);xb(d,function(a){return 1===a.status})&&Qe(a,c.path(),d)}else c.sb()&&c.A(function(b){Me(a,b)})}
+function Qe(a,b,c){for(var d=0;d<c.length;d++)v(1===c[d].status,"tryToSendTransactionQueue_: items in queue should all be run."),c[d].status=2,c[d].vd++;var e=S(a.g.M,b).hash();T(a.g.M,b,S(a.g.pa,b));for(var f=S(a.Ha,b).V(!0),g=Kb(),k=Re(c),d=0;d<k.length;d++)J(I(a.g.Fb,k[d]),g);a.u.put(b.toString(),f,function(e){a.e("transaction put response",{path:b.toString(),status:e});for(d=0;d<k.length;d++){var f=I(a.g.Fb,k[d]),p=f.j();v(null!==p,"sendTransactionQueue_: pendingPut should not be null.");p===
+g&&(J(f,null),T(a.g.M,k[d],S(a.g.va,k[d])))}if("ok"===e){e=[];for(d=0;d<c.length;d++)c[d].status=3,c[d].D&&(f=Ne(a,c[d].path),e.push(r(c[d].D,null,null,!0,f))),c[d].tc();Oe(a,I(a.Sa,b));Me(a);for(d=0;d<e.length;d++)ec(e[d])}else{if("datastale"===e)for(d=0;d<c.length;d++)c[d].status=4===c[d].status?5:1;else for(L("transaction at "+b+" failed: "+e),d=0;d<c.length;d++)c[d].status=5,c[d].uc=e;e=De(a,b);W(a.I,e,[b])}},e)}
+function Re(a){for(var b={},c=0;c<a.length;c++)a[c].wc&&(b[a[c].path.toString()]=a[c].path);a=[];for(var d in b)a.push(b[d]);return a}
+function De(a,b){var c=Se(a,b),d=c.path(),c=Pe(a,c);T(a.g.pa,d,S(a.g.M,d));T(a.Ha,d,S(a.g.M,d));if(0!==c.length){for(var e=S(a.g.pa,d),f=e,g=[],k=0;k<c.length;k++){var l=Na(d,c[k].path),m=!1,p;v(null!==l,"rerunTransactionsUnderNode_: relativePath should not be null.");if(5===c[k].status)m=!0,p=c[k].uc;else if(1===c[k].status)if(25<=c[k].vd)m=!0,p="maxretry";else{var t=e.L(l),s=c[k].update(t.V());if(n(s)){Aa("transaction failed: Data returned ",s);var w=O(s);"object"===typeof s&&null!=s&&A(s,".priority")||
+(w=w.Ia(t.k()));e=e.Aa(l,w);c[k].wc&&(f=f.Aa(l,w))}else m=!0,p="nodata"}m&&(c[k].status=3,setTimeout(c[k].tc,0),c[k].D&&(m=new E(a,c[k].path),l=new P(e.L(l),m),"nodata"===p?g.push(r(c[k].D,null,null,!1,l)):g.push(r(c[k].D,null,Error(p),!1,l))))}T(a.Ha,d,e);T(a.g.pa,d,f);Oe(a,a.Sa);for(k=0;k<g.length;k++)ec(g[k]);Me(a)}return d}function Se(a,b){for(var c,d=a.Sa;null!==(c=C(b))&&null===d.j();)d=I(d,c),b=La(b);return d}
+function Pe(a,b){var c=[];Te(a,b,c);c.sort(function(a,b){return a.qd-b.qd});return c}function Te(a,b,c){var d=b.j();if(null!==d)for(var e=0;e<d.length;e++)c.push(d[e]);b.A(function(b){Te(a,b,c)})}function Oe(a,b){var c=b.j();if(c){for(var d=0,e=0;e<c.length;e++)3!==c[e].status&&(c[d]=c[e],d++);c.length=d;J(b,0<c.length?c:null)}b.A(function(b){Oe(a,b)})}function Fe(a,b){var c=Se(a,b).path(),d=I(a.Sa,b);Sa(d,function(a){Ue(a)});Ue(d);Ra(d,function(a){Ue(a)});return c}
+function Ue(a){var b=a.j();if(null!==b){for(var c=[],d=-1,e=0;e<b.length;e++)4!==b[e].status&&(2===b[e].status?(v(d===e-1,"All SENT items should be at beginning of queue."),d=e,b[e].status=4,b[e].uc="set"):(v(1===b[e].status),b[e].tc(),b[e].D&&c.push(r(b[e].D,null,Error("set"),!1,null))));-1===d?J(a,null):b.length=d+1;for(e=0;e<c.length;e++)ec(c[e])}}function Ne(a,b){var c=new E(a,b);return new P(S(a.Ha,b),c)}
+function Le(a,b,c,d){if(d.f())return c;if(null!=d.j())return b;var e=c;d.A(function(d){var g=d.name(),k=new F(g);d=Le(a,b.L(k),c.L(k),d);e=e.H(g,d)});return e};function Y(){this.ib={}}ca(Y);Y.prototype.La=function(){for(var a in this.ib)this.ib[a].La()};Y.prototype.interrupt=Y.prototype.La;Y.prototype.jb=function(){for(var a in this.ib)this.ib[a].jb()};Y.prototype.resume=Y.prototype.jb;var Z={Nd:function(a){var b=N.prototype.hash;N.prototype.hash=a;var c=fc.prototype.hash;fc.prototype.hash=a;return function(){N.prototype.hash=b;fc.prototype.hash=c}}};Z.hijackHash=Z.Nd;Z.Pa=function(a){return a.Pa()};Z.queryIdentifier=Z.Pa;Z.Qd=function(a){return a.m.u.ia};Z.listens=Z.Qd;Z.Yd=function(a){return a.m.u.la};Z.refConnection=Z.Yd;Z.Cd=ld;Z.DataConnection=Z.Cd;ld.prototype.sendRequest=ld.prototype.Ga;ld.prototype.interrupt=ld.prototype.La;Z.Dd=$c;Z.RealTimeConnection=Z.Dd;
+$c.prototype.sendRequest=$c.prototype.xd;$c.prototype.close=$c.prototype.close;Z.Bd=ob;Z.ConnectionTarget=Z.Bd;Z.Ld=function(){Oc=Gc=!0};Z.forceLongPolling=Z.Ld;Z.Md=function(){Pc=!0};Z.forceWebSockets=Z.Md;Z.de=function(a,b){a.m.u.Vc=b};Z.setSecurityDebugCallback=Z.de;Z.Xc=function(a,b){a.m.Xc(b)};Z.stats=Z.Xc;Z.Yc=function(a,b){a.m.Yc(b)};Z.statsIncrementCounter=Z.Yc;Z.Cc=function(a){return a.m.Cc};Z.Od=function(a,b){a.m.md=b};Z.interceptServerData=Z.Od;function $(a,b,c){this.Jb=a;this.X=b;this.Fa=c}$.prototype.cancel=function(a){x("Firebase.onDisconnect().cancel",0,1,arguments.length);z("Firebase.onDisconnect().cancel",1,a,!0);this.Jb.Nc(this.X,a)};$.prototype.cancel=$.prototype.cancel;$.prototype.remove=function(a){x("Firebase.onDisconnect().remove",0,1,arguments.length);B("Firebase.onDisconnect().remove",this.X);z("Firebase.onDisconnect().remove",1,a,!0);Ge(this.Jb,this.X,null,a)};$.prototype.remove=$.prototype.remove;
+$.prototype.set=function(a,b){x("Firebase.onDisconnect().set",1,2,arguments.length);B("Firebase.onDisconnect().set",this.X);za("Firebase.onDisconnect().set",a,!1);z("Firebase.onDisconnect().set",2,b,!0);Ge(this.Jb,this.X,a,b)};$.prototype.set=$.prototype.set;
+$.prototype.kb=function(a,b,c){x("Firebase.onDisconnect().setWithPriority",2,3,arguments.length);B("Firebase.onDisconnect().setWithPriority",this.X);za("Firebase.onDisconnect().setWithPriority",a,!1);Ea("Firebase.onDisconnect().setWithPriority",2,b,!1);z("Firebase.onDisconnect().setWithPriority",3,c,!0);if(".length"===this.Fa||".keys"===this.Fa)throw"Firebase.onDisconnect().setWithPriority failed: "+this.Fa+" is a read-only object.";He(this.Jb,this.X,a,b,c)};$.prototype.setWithPriority=$.prototype.kb;
+$.prototype.update=function(a,b){x("Firebase.onDisconnect().update",1,2,arguments.length);B("Firebase.onDisconnect().update",this.X);Da("Firebase.onDisconnect().update",a);z("Firebase.onDisconnect().update",2,b,!0);Ie(this.Jb,this.X,a,b)};$.prototype.update=$.prototype.update;var Ve=function(){var a=0,b=[];return function(c){var d=c===a;a=c;for(var e=Array(8),f=7;0<=f;f--)e[f]="-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz".charAt(c%64),c=Math.floor(c/64);v(0===c,"Cannot push at time == 0");c=e.join("");if(d){for(f=11;0<=f&&63===b[f];f--)b[f]=0;b[f]++}else for(f=0;12>f;f++)b[f]=Math.floor(64*Math.random());for(f=0;12>f;f++)c+="-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz".charAt(b[f]);v(20===c.length,"NextPushId: Length should be 20.");
+return c}}();function E(a,b){var c,d;if(a instanceof ze)c=a,d=b;else{x("new Firebase",1,2,arguments.length);var e=arguments[0];d=c="";var f=!0,g="";if(q(e)){var k=e.indexOf("//");if(0<=k)var l=e.substring(0,k-1),e=e.substring(k+2);k=e.indexOf("/");-1===k&&(k=e.length);c=e.substring(0,k);var e=e.substring(k+1),m=c.split(".");if(3==m.length){k=m[2].indexOf(":");f=0<=k?"https"===l||"wss"===l:!0;if("firebase"===m[1])Sb(c+" is no longer supported. Please use <YOUR FIREBASE>.firebaseio.com instead");else for(d=m[0],
+g="",e=("/"+e).split("/"),k=0;k<e.length;k++)if(0<e[k].length){m=e[k];try{m=decodeURIComponent(m.replace(/\+/g," "))}catch(p){}g+="/"+m}d=d.toLowerCase()}else Sb("Cannot parse Firebase url. Please use https:<YOUR FIREBASE>.firebaseio.com")}f||"undefined"!==typeof window&&window.location&&window.location.protocol&&-1!==window.location.protocol.indexOf("https:")&&L("Insecure Firebase access from a secure page. Please use https in calls to new Firebase().");c=new ob(c,f,d,"ws"===l||"wss"===l);d=new F(g);
+f=d.toString();!(l=!q(c.host)||0===c.host.length||!ya(c.Yb))&&(l=0!==f.length)&&(f&&(f=f.replace(/^\/*\.info(\/|$)/,"/")),l=!(q(f)&&0!==f.length&&!xa.test(f)));if(l)throw Error(y("new Firebase",1,!1)+'must be a valid firebase URL and the path can\'t contain ".", "#", "$", "[", or "]".');if(b)if(b instanceof Y)f=b;else throw Error("Expected a valid Firebase.Context for second argument to new Firebase()");else f=Y.rb();l=c.toString();e=va(f.ib,l);e||(e=new ze(c),f.ib[l]=e);c=e}D.call(this,c,d)}
+ja(E,D);var We=E,Xe=["Firebase"],Ye=aa;Xe[0]in Ye||!Ye.execScript||Ye.execScript("var "+Xe[0]);for(var Ze;Xe.length&&(Ze=Xe.shift());)!Xe.length&&n(We)?Ye[Ze]=We:Ye=Ye[Ze]?Ye[Ze]:Ye[Ze]={};E.prototype.name=function(){x("Firebase.name",0,0,arguments.length);return this.path.f()?null:Ma(this.path)};E.prototype.name=E.prototype.name;
+E.prototype.G=function(a){x("Firebase.child",1,1,arguments.length);if(fa(a))a=String(a);else if(!(a instanceof F))if(null===C(this.path)){var b=a;b&&(b=b.replace(/^\/*\.info(\/|$)/,"/"));Ha("Firebase.child",b)}else Ha("Firebase.child",a);return new E(this.m,this.path.G(a))};E.prototype.child=E.prototype.G;E.prototype.parent=function(){x("Firebase.parent",0,0,arguments.length);var a=this.path.parent();return null===a?null:new E(this.m,a)};E.prototype.parent=E.prototype.parent;
+E.prototype.root=function(){x("Firebase.ref",0,0,arguments.length);for(var a=this;null!==a.parent();)a=a.parent();return a};E.prototype.root=E.prototype.root;E.prototype.toString=function(){x("Firebase.toString",0,0,arguments.length);var a;if(null===this.parent())a=this.m.toString();else{a=this.parent().toString()+"/";var b=this.name();a+=encodeURIComponent(String(b))}return a};E.prototype.toString=E.prototype.toString;
+E.prototype.set=function(a,b){x("Firebase.set",1,2,arguments.length);B("Firebase.set",this.path);za("Firebase.set",a,!1);z("Firebase.set",2,b,!0);this.m.kb(this.path,a,null,b)};E.prototype.set=E.prototype.set;E.prototype.update=function(a,b){x("Firebase.update",1,2,arguments.length);B("Firebase.update",this.path);Da("Firebase.update",a);z("Firebase.update",2,b,!0);if(A(a,".priority"))throw Error("update() does not currently support updating .priority.");this.m.update(this.path,a,b)};
+E.prototype.update=E.prototype.update;E.prototype.kb=function(a,b,c){x("Firebase.setWithPriority",2,3,arguments.length);B("Firebase.setWithPriority",this.path);za("Firebase.setWithPriority",a,!1);Ea("Firebase.setWithPriority",2,b,!1);z("Firebase.setWithPriority",3,c,!0);if(".length"===this.name()||".keys"===this.name())throw"Firebase.setWithPriority failed: "+this.name()+" is a read-only object.";this.m.kb(this.path,a,b,c)};E.prototype.setWithPriority=E.prototype.kb;
+E.prototype.remove=function(a){x("Firebase.remove",0,1,arguments.length);B("Firebase.remove",this.path);z("Firebase.remove",1,a,!0);this.set(null,a)};E.prototype.remove=E.prototype.remove;
+E.prototype.transaction=function(a,b,c){x("Firebase.transaction",1,3,arguments.length);B("Firebase.transaction",this.path);z("Firebase.transaction",1,a,!1);z("Firebase.transaction",2,b,!0);if(n(c)&&"boolean"!=typeof c)throw Error(y("Firebase.transaction",3,!0)+"must be a boolean.");if(".length"===this.name()||".keys"===this.name())throw"Firebase.transaction failed: "+this.name()+" is a read-only object.";"undefined"===typeof c&&(c=!0);Ke(this.m,this.path,a,b,c)};E.prototype.transaction=E.prototype.transaction;
+E.prototype.Wc=function(a,b){x("Firebase.setPriority",1,2,arguments.length);B("Firebase.setPriority",this.path);Ea("Firebase.setPriority",1,a,!1);z("Firebase.setPriority",2,b,!0);this.m.Wc(this.path,a,b)};E.prototype.setPriority=E.prototype.Wc;E.prototype.push=function(a,b){x("Firebase.push",0,2,arguments.length);B("Firebase.push",this.path);za("Firebase.push",a,!0);z("Firebase.push",2,b,!0);var c=Be(this.m),c=Ve(c),c=this.G(c);"undefined"!==typeof a&&null!==a&&c.set(a,b);return c};
+E.prototype.push=E.prototype.push;E.prototype.ja=function(){return new $(this.m,this.path,this.name())};E.prototype.onDisconnect=E.prototype.ja;E.prototype.Zd=function(){L("FirebaseRef.removeOnDisconnect() being deprecated. Please use FirebaseRef.onDisconnect().remove() instead.");this.ja().remove();Je(this.m)};E.prototype.removeOnDisconnect=E.prototype.Zd;
+E.prototype.ce=function(a){L("FirebaseRef.setOnDisconnect(value) being deprecated. Please use FirebaseRef.onDisconnect().set(value) instead.");this.ja().set(a);Je(this.m)};E.prototype.setOnDisconnect=E.prototype.ce;E.prototype.mb=function(a,b,c){x("Firebase.auth",1,3,arguments.length);if(!q(a))throw Error(y("Firebase.auth",1,!1)+"must be a valid credential (a string).");z("Firebase.auth",2,b,!0);z("Firebase.auth",3,b,!0);this.m.mb(a,b,c)};E.prototype.auth=E.prototype.mb;
+E.prototype.Pb=function(a){x("Firebase.unauth",0,1,arguments.length);z("Firebase.unauth",1,a,!0);this.m.Pb(a)};E.prototype.unauth=E.prototype.Pb;E.goOffline=function(){x("Firebase.goOffline",0,0,arguments.length);Y.rb().La()};E.goOnline=function(){x("Firebase.goOnline",0,0,arguments.length);Y.rb().jb()};
+function Pb(a,b){v(!b||!0===a||!1===a,"Can't turn on custom loggers persistently.");!0===a?("undefined"!==typeof console&&("function"===typeof console.log?Nb=r(console.log,console):"object"===typeof console.log&&(Nb=function(a){console.log(a)})),b&&nb.set("logging_enabled",!0)):a?Nb=a:(Nb=null,nb.remove("logging_enabled"))}E.enableLogging=Pb;E.ServerValue={TIMESTAMP:{".sv":"timestamp"}};E.INTERNAL=Z;E.Context=Y;})();
+module.exports = Firebase;
+
+},{}],20:[function(require,module,exports){
 (function (Buffer){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -35410,7 +38434,7 @@ function objectToString(o) {
 }
 
 }).call(this,{"isBuffer":require("../../is-buffer/index.js")})
-},{"../../is-buffer/index.js":29}],16:[function(require,module,exports){
+},{"../../is-buffer/index.js":34}],21:[function(require,module,exports){
 module.exports = function() {
   var d3 = {
     version: "3.4.11"
@@ -44644,7 +47668,7 @@ module.exports = function() {
   return d3;
 }();
 
-},{}],17:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
 (function (process,Buffer){
 var stream = require('readable-stream')
 var eos = require('end-of-stream')
@@ -44875,7 +47899,7 @@ Duplexify.prototype.end = function(data, enc, cb) {
 module.exports = Duplexify
 
 }).call(this,require('_process'),require("buffer").Buffer)
-},{"_process":55,"buffer":13,"end-of-stream":18,"inherits":28,"readable-stream":25}],18:[function(require,module,exports){
+},{"_process":61,"buffer":17,"end-of-stream":23,"inherits":33,"readable-stream":30}],23:[function(require,module,exports){
 var once = require('once');
 
 var noop = function() {};
@@ -44948,9 +47972,9 @@ var eos = function(stream, opts, callback) {
 };
 
 module.exports = eos;
-},{"once":53}],19:[function(require,module,exports){
-arguments[4][14][0].apply(exports,arguments)
-},{"dup":14}],20:[function(require,module,exports){
+},{"once":59}],24:[function(require,module,exports){
+arguments[4][18][0].apply(exports,arguments)
+},{"dup":18}],25:[function(require,module,exports){
 // a duplex stream is just a stream that is both readable and writable.
 // Since JS doesn't have multiple prototypal inheritance, this class
 // prototypally inherits from Readable, and then parasitically from
@@ -45026,7 +48050,7 @@ function forEach(xs, f) {
     f(xs[i], i);
   }
 }
-},{"./_stream_readable":22,"./_stream_writable":24,"core-util-is":15,"inherits":28,"process-nextick-args":54}],21:[function(require,module,exports){
+},{"./_stream_readable":27,"./_stream_writable":29,"core-util-is":20,"inherits":33,"process-nextick-args":60}],26:[function(require,module,exports){
 // a passthrough stream.
 // basically just the most minimal sort of Transform stream.
 // Every written chunk gets output as-is.
@@ -45053,7 +48077,7 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":23,"core-util-is":15,"inherits":28}],22:[function(require,module,exports){
+},{"./_stream_transform":28,"core-util-is":20,"inherits":33}],27:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -45949,7 +48973,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this,require('_process'))
-},{"./_stream_duplex":20,"_process":55,"buffer":13,"buffer-shims":12,"core-util-is":15,"events":26,"inherits":28,"isarray":19,"process-nextick-args":54,"string_decoder/":73,"util":11}],23:[function(require,module,exports){
+},{"./_stream_duplex":25,"_process":61,"buffer":17,"buffer-shims":16,"core-util-is":20,"events":31,"inherits":33,"isarray":24,"process-nextick-args":60,"string_decoder/":79,"util":15}],28:[function(require,module,exports){
 // a transform stream is a readable/writable stream where you do
 // something with the data.  Sometimes it's called a "filter",
 // but that's not a great name for it, since that implies a thing where
@@ -46130,7 +49154,7 @@ function done(stream, er) {
 
   return stream.push(null);
 }
-},{"./_stream_duplex":20,"core-util-is":15,"inherits":28}],24:[function(require,module,exports){
+},{"./_stream_duplex":25,"core-util-is":20,"inherits":33}],29:[function(require,module,exports){
 (function (process){
 // A bit simpler than readable streams.
 // Implement an async ._write(chunk, encoding, cb), and it'll handle all
@@ -46659,7 +49683,7 @@ function CorkedRequest(state) {
   };
 }
 }).call(this,require('_process'))
-},{"./_stream_duplex":20,"_process":55,"buffer":13,"buffer-shims":12,"core-util-is":15,"events":26,"inherits":28,"process-nextick-args":54,"util-deprecate":83}],25:[function(require,module,exports){
+},{"./_stream_duplex":25,"_process":61,"buffer":17,"buffer-shims":16,"core-util-is":20,"events":31,"inherits":33,"process-nextick-args":60,"util-deprecate":89}],30:[function(require,module,exports){
 (function (process){
 var Stream = (function (){
   try {
@@ -46679,7 +49703,7 @@ if (!process.browser && process.env.READABLE_STREAM === 'disable' && Stream) {
 }
 
 }).call(this,require('_process'))
-},{"./lib/_stream_duplex.js":20,"./lib/_stream_passthrough.js":21,"./lib/_stream_readable.js":22,"./lib/_stream_transform.js":23,"./lib/_stream_writable.js":24,"_process":55}],26:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":25,"./lib/_stream_passthrough.js":26,"./lib/_stream_readable.js":27,"./lib/_stream_transform.js":28,"./lib/_stream_writable.js":29,"_process":61}],31:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -46983,7 +50007,7 @@ function isUndefined(arg) {
   return arg === void 0;
 }
 
-},{}],27:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = nBytes * 8 - mLen - 1
@@ -47069,7 +50093,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],28:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -47094,7 +50118,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],29:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 /**
  * Determine if an object is Buffer
  *
@@ -47113,12 +50137,10088 @@ module.exports = function (obj) {
     ))
 }
 
-},{}],30:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 module.exports = Array.isArray || function (arr) {
   return Object.prototype.toString.call(arr) == '[object Array]';
 };
 
-},{}],31:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
+/*eslint-disable no-unused-vars*/
+/*!
+ * jQuery JavaScript Library v3.1.0
+ * https://jquery.com/
+ *
+ * Includes Sizzle.js
+ * https://sizzlejs.com/
+ *
+ * Copyright jQuery Foundation and other contributors
+ * Released under the MIT license
+ * https://jquery.org/license
+ *
+ * Date: 2016-07-07T21:44Z
+ */
+( function( global, factory ) {
+
+	"use strict";
+
+	if ( typeof module === "object" && typeof module.exports === "object" ) {
+
+		// For CommonJS and CommonJS-like environments where a proper `window`
+		// is present, execute the factory and get jQuery.
+		// For environments that do not have a `window` with a `document`
+		// (such as Node.js), expose a factory as module.exports.
+		// This accentuates the need for the creation of a real `window`.
+		// e.g. var jQuery = require("jquery")(window);
+		// See ticket #14549 for more info.
+		module.exports = global.document ?
+			factory( global, true ) :
+			function( w ) {
+				if ( !w.document ) {
+					throw new Error( "jQuery requires a window with a document" );
+				}
+				return factory( w );
+			};
+	} else {
+		factory( global );
+	}
+
+// Pass this if window is not defined yet
+} )( typeof window !== "undefined" ? window : this, function( window, noGlobal ) {
+
+// Edge <= 12 - 13+, Firefox <=18 - 45+, IE 10 - 11, Safari 5.1 - 9+, iOS 6 - 9.1
+// throw exceptions when non-strict code (e.g., ASP.NET 4.5) accesses strict mode
+// arguments.callee.caller (trac-13335). But as of jQuery 3.0 (2016), strict mode should be common
+// enough that all such attempts are guarded in a try block.
+"use strict";
+
+var arr = [];
+
+var document = window.document;
+
+var getProto = Object.getPrototypeOf;
+
+var slice = arr.slice;
+
+var concat = arr.concat;
+
+var push = arr.push;
+
+var indexOf = arr.indexOf;
+
+var class2type = {};
+
+var toString = class2type.toString;
+
+var hasOwn = class2type.hasOwnProperty;
+
+var fnToString = hasOwn.toString;
+
+var ObjectFunctionString = fnToString.call( Object );
+
+var support = {};
+
+
+
+	function DOMEval( code, doc ) {
+		doc = doc || document;
+
+		var script = doc.createElement( "script" );
+
+		script.text = code;
+		doc.head.appendChild( script ).parentNode.removeChild( script );
+	}
+/* global Symbol */
+// Defining this global in .eslintrc would create a danger of using the global
+// unguarded in another place, it seems safer to define global only for this module
+
+
+
+var
+	version = "3.1.0",
+
+	// Define a local copy of jQuery
+	jQuery = function( selector, context ) {
+
+		// The jQuery object is actually just the init constructor 'enhanced'
+		// Need init if jQuery is called (just allow error to be thrown if not included)
+		return new jQuery.fn.init( selector, context );
+	},
+
+	// Support: Android <=4.0 only
+	// Make sure we trim BOM and NBSP
+	rtrim = /^[\s\uFEFF\xA0]+|[\s\uFEFF\xA0]+$/g,
+
+	// Matches dashed string for camelizing
+	rmsPrefix = /^-ms-/,
+	rdashAlpha = /-([a-z])/g,
+
+	// Used by jQuery.camelCase as callback to replace()
+	fcamelCase = function( all, letter ) {
+		return letter.toUpperCase();
+	};
+
+jQuery.fn = jQuery.prototype = {
+
+	// The current version of jQuery being used
+	jquery: version,
+
+	constructor: jQuery,
+
+	// The default length of a jQuery object is 0
+	length: 0,
+
+	toArray: function() {
+		return slice.call( this );
+	},
+
+	// Get the Nth element in the matched element set OR
+	// Get the whole matched element set as a clean array
+	get: function( num ) {
+		return num != null ?
+
+			// Return just the one element from the set
+			( num < 0 ? this[ num + this.length ] : this[ num ] ) :
+
+			// Return all the elements in a clean array
+			slice.call( this );
+	},
+
+	// Take an array of elements and push it onto the stack
+	// (returning the new matched element set)
+	pushStack: function( elems ) {
+
+		// Build a new jQuery matched element set
+		var ret = jQuery.merge( this.constructor(), elems );
+
+		// Add the old object onto the stack (as a reference)
+		ret.prevObject = this;
+
+		// Return the newly-formed element set
+		return ret;
+	},
+
+	// Execute a callback for every element in the matched set.
+	each: function( callback ) {
+		return jQuery.each( this, callback );
+	},
+
+	map: function( callback ) {
+		return this.pushStack( jQuery.map( this, function( elem, i ) {
+			return callback.call( elem, i, elem );
+		} ) );
+	},
+
+	slice: function() {
+		return this.pushStack( slice.apply( this, arguments ) );
+	},
+
+	first: function() {
+		return this.eq( 0 );
+	},
+
+	last: function() {
+		return this.eq( -1 );
+	},
+
+	eq: function( i ) {
+		var len = this.length,
+			j = +i + ( i < 0 ? len : 0 );
+		return this.pushStack( j >= 0 && j < len ? [ this[ j ] ] : [] );
+	},
+
+	end: function() {
+		return this.prevObject || this.constructor();
+	},
+
+	// For internal use only.
+	// Behaves like an Array's method, not like a jQuery method.
+	push: push,
+	sort: arr.sort,
+	splice: arr.splice
+};
+
+jQuery.extend = jQuery.fn.extend = function() {
+	var options, name, src, copy, copyIsArray, clone,
+		target = arguments[ 0 ] || {},
+		i = 1,
+		length = arguments.length,
+		deep = false;
+
+	// Handle a deep copy situation
+	if ( typeof target === "boolean" ) {
+		deep = target;
+
+		// Skip the boolean and the target
+		target = arguments[ i ] || {};
+		i++;
+	}
+
+	// Handle case when target is a string or something (possible in deep copy)
+	if ( typeof target !== "object" && !jQuery.isFunction( target ) ) {
+		target = {};
+	}
+
+	// Extend jQuery itself if only one argument is passed
+	if ( i === length ) {
+		target = this;
+		i--;
+	}
+
+	for ( ; i < length; i++ ) {
+
+		// Only deal with non-null/undefined values
+		if ( ( options = arguments[ i ] ) != null ) {
+
+			// Extend the base object
+			for ( name in options ) {
+				src = target[ name ];
+				copy = options[ name ];
+
+				// Prevent never-ending loop
+				if ( target === copy ) {
+					continue;
+				}
+
+				// Recurse if we're merging plain objects or arrays
+				if ( deep && copy && ( jQuery.isPlainObject( copy ) ||
+					( copyIsArray = jQuery.isArray( copy ) ) ) ) {
+
+					if ( copyIsArray ) {
+						copyIsArray = false;
+						clone = src && jQuery.isArray( src ) ? src : [];
+
+					} else {
+						clone = src && jQuery.isPlainObject( src ) ? src : {};
+					}
+
+					// Never move original objects, clone them
+					target[ name ] = jQuery.extend( deep, clone, copy );
+
+				// Don't bring in undefined values
+				} else if ( copy !== undefined ) {
+					target[ name ] = copy;
+				}
+			}
+		}
+	}
+
+	// Return the modified object
+	return target;
+};
+
+jQuery.extend( {
+
+	// Unique for each copy of jQuery on the page
+	expando: "jQuery" + ( version + Math.random() ).replace( /\D/g, "" ),
+
+	// Assume jQuery is ready without the ready module
+	isReady: true,
+
+	error: function( msg ) {
+		throw new Error( msg );
+	},
+
+	noop: function() {},
+
+	isFunction: function( obj ) {
+		return jQuery.type( obj ) === "function";
+	},
+
+	isArray: Array.isArray,
+
+	isWindow: function( obj ) {
+		return obj != null && obj === obj.window;
+	},
+
+	isNumeric: function( obj ) {
+
+		// As of jQuery 3.0, isNumeric is limited to
+		// strings and numbers (primitives or objects)
+		// that can be coerced to finite numbers (gh-2662)
+		var type = jQuery.type( obj );
+		return ( type === "number" || type === "string" ) &&
+
+			// parseFloat NaNs numeric-cast false positives ("")
+			// ...but misinterprets leading-number strings, particularly hex literals ("0x...")
+			// subtraction forces infinities to NaN
+			!isNaN( obj - parseFloat( obj ) );
+	},
+
+	isPlainObject: function( obj ) {
+		var proto, Ctor;
+
+		// Detect obvious negatives
+		// Use toString instead of jQuery.type to catch host objects
+		if ( !obj || toString.call( obj ) !== "[object Object]" ) {
+			return false;
+		}
+
+		proto = getProto( obj );
+
+		// Objects with no prototype (e.g., `Object.create( null )`) are plain
+		if ( !proto ) {
+			return true;
+		}
+
+		// Objects with prototype are plain iff they were constructed by a global Object function
+		Ctor = hasOwn.call( proto, "constructor" ) && proto.constructor;
+		return typeof Ctor === "function" && fnToString.call( Ctor ) === ObjectFunctionString;
+	},
+
+	isEmptyObject: function( obj ) {
+
+		/* eslint-disable no-unused-vars */
+		// See https://github.com/eslint/eslint/issues/6125
+		var name;
+
+		for ( name in obj ) {
+			return false;
+		}
+		return true;
+	},
+
+	type: function( obj ) {
+		if ( obj == null ) {
+			return obj + "";
+		}
+
+		// Support: Android <=2.3 only (functionish RegExp)
+		return typeof obj === "object" || typeof obj === "function" ?
+			class2type[ toString.call( obj ) ] || "object" :
+			typeof obj;
+	},
+
+	// Evaluates a script in a global context
+	globalEval: function( code ) {
+		DOMEval( code );
+	},
+
+	// Convert dashed to camelCase; used by the css and data modules
+	// Support: IE <=9 - 11, Edge 12 - 13
+	// Microsoft forgot to hump their vendor prefix (#9572)
+	camelCase: function( string ) {
+		return string.replace( rmsPrefix, "ms-" ).replace( rdashAlpha, fcamelCase );
+	},
+
+	nodeName: function( elem, name ) {
+		return elem.nodeName && elem.nodeName.toLowerCase() === name.toLowerCase();
+	},
+
+	each: function( obj, callback ) {
+		var length, i = 0;
+
+		if ( isArrayLike( obj ) ) {
+			length = obj.length;
+			for ( ; i < length; i++ ) {
+				if ( callback.call( obj[ i ], i, obj[ i ] ) === false ) {
+					break;
+				}
+			}
+		} else {
+			for ( i in obj ) {
+				if ( callback.call( obj[ i ], i, obj[ i ] ) === false ) {
+					break;
+				}
+			}
+		}
+
+		return obj;
+	},
+
+	// Support: Android <=4.0 only
+	trim: function( text ) {
+		return text == null ?
+			"" :
+			( text + "" ).replace( rtrim, "" );
+	},
+
+	// results is for internal usage only
+	makeArray: function( arr, results ) {
+		var ret = results || [];
+
+		if ( arr != null ) {
+			if ( isArrayLike( Object( arr ) ) ) {
+				jQuery.merge( ret,
+					typeof arr === "string" ?
+					[ arr ] : arr
+				);
+			} else {
+				push.call( ret, arr );
+			}
+		}
+
+		return ret;
+	},
+
+	inArray: function( elem, arr, i ) {
+		return arr == null ? -1 : indexOf.call( arr, elem, i );
+	},
+
+	// Support: Android <=4.0 only, PhantomJS 1 only
+	// push.apply(_, arraylike) throws on ancient WebKit
+	merge: function( first, second ) {
+		var len = +second.length,
+			j = 0,
+			i = first.length;
+
+		for ( ; j < len; j++ ) {
+			first[ i++ ] = second[ j ];
+		}
+
+		first.length = i;
+
+		return first;
+	},
+
+	grep: function( elems, callback, invert ) {
+		var callbackInverse,
+			matches = [],
+			i = 0,
+			length = elems.length,
+			callbackExpect = !invert;
+
+		// Go through the array, only saving the items
+		// that pass the validator function
+		for ( ; i < length; i++ ) {
+			callbackInverse = !callback( elems[ i ], i );
+			if ( callbackInverse !== callbackExpect ) {
+				matches.push( elems[ i ] );
+			}
+		}
+
+		return matches;
+	},
+
+	// arg is for internal usage only
+	map: function( elems, callback, arg ) {
+		var length, value,
+			i = 0,
+			ret = [];
+
+		// Go through the array, translating each of the items to their new values
+		if ( isArrayLike( elems ) ) {
+			length = elems.length;
+			for ( ; i < length; i++ ) {
+				value = callback( elems[ i ], i, arg );
+
+				if ( value != null ) {
+					ret.push( value );
+				}
+			}
+
+		// Go through every key on the object,
+		} else {
+			for ( i in elems ) {
+				value = callback( elems[ i ], i, arg );
+
+				if ( value != null ) {
+					ret.push( value );
+				}
+			}
+		}
+
+		// Flatten any nested arrays
+		return concat.apply( [], ret );
+	},
+
+	// A global GUID counter for objects
+	guid: 1,
+
+	// Bind a function to a context, optionally partially applying any
+	// arguments.
+	proxy: function( fn, context ) {
+		var tmp, args, proxy;
+
+		if ( typeof context === "string" ) {
+			tmp = fn[ context ];
+			context = fn;
+			fn = tmp;
+		}
+
+		// Quick check to determine if target is callable, in the spec
+		// this throws a TypeError, but we will just return undefined.
+		if ( !jQuery.isFunction( fn ) ) {
+			return undefined;
+		}
+
+		// Simulated bind
+		args = slice.call( arguments, 2 );
+		proxy = function() {
+			return fn.apply( context || this, args.concat( slice.call( arguments ) ) );
+		};
+
+		// Set the guid of unique handler to the same of original handler, so it can be removed
+		proxy.guid = fn.guid = fn.guid || jQuery.guid++;
+
+		return proxy;
+	},
+
+	now: Date.now,
+
+	// jQuery.support is not used in Core but other projects attach their
+	// properties to it so it needs to exist.
+	support: support
+} );
+
+if ( typeof Symbol === "function" ) {
+	jQuery.fn[ Symbol.iterator ] = arr[ Symbol.iterator ];
+}
+
+// Populate the class2type map
+jQuery.each( "Boolean Number String Function Array Date RegExp Object Error Symbol".split( " " ),
+function( i, name ) {
+	class2type[ "[object " + name + "]" ] = name.toLowerCase();
+} );
+
+function isArrayLike( obj ) {
+
+	// Support: real iOS 8.2 only (not reproducible in simulator)
+	// `in` check used to prevent JIT error (gh-2145)
+	// hasOwn isn't used here due to false negatives
+	// regarding Nodelist length in IE
+	var length = !!obj && "length" in obj && obj.length,
+		type = jQuery.type( obj );
+
+	if ( type === "function" || jQuery.isWindow( obj ) ) {
+		return false;
+	}
+
+	return type === "array" || length === 0 ||
+		typeof length === "number" && length > 0 && ( length - 1 ) in obj;
+}
+var Sizzle =
+/*!
+ * Sizzle CSS Selector Engine v2.3.0
+ * https://sizzlejs.com/
+ *
+ * Copyright jQuery Foundation and other contributors
+ * Released under the MIT license
+ * http://jquery.org/license
+ *
+ * Date: 2016-01-04
+ */
+(function( window ) {
+
+var i,
+	support,
+	Expr,
+	getText,
+	isXML,
+	tokenize,
+	compile,
+	select,
+	outermostContext,
+	sortInput,
+	hasDuplicate,
+
+	// Local document vars
+	setDocument,
+	document,
+	docElem,
+	documentIsHTML,
+	rbuggyQSA,
+	rbuggyMatches,
+	matches,
+	contains,
+
+	// Instance-specific data
+	expando = "sizzle" + 1 * new Date(),
+	preferredDoc = window.document,
+	dirruns = 0,
+	done = 0,
+	classCache = createCache(),
+	tokenCache = createCache(),
+	compilerCache = createCache(),
+	sortOrder = function( a, b ) {
+		if ( a === b ) {
+			hasDuplicate = true;
+		}
+		return 0;
+	},
+
+	// Instance methods
+	hasOwn = ({}).hasOwnProperty,
+	arr = [],
+	pop = arr.pop,
+	push_native = arr.push,
+	push = arr.push,
+	slice = arr.slice,
+	// Use a stripped-down indexOf as it's faster than native
+	// https://jsperf.com/thor-indexof-vs-for/5
+	indexOf = function( list, elem ) {
+		var i = 0,
+			len = list.length;
+		for ( ; i < len; i++ ) {
+			if ( list[i] === elem ) {
+				return i;
+			}
+		}
+		return -1;
+	},
+
+	booleans = "checked|selected|async|autofocus|autoplay|controls|defer|disabled|hidden|ismap|loop|multiple|open|readonly|required|scoped",
+
+	// Regular expressions
+
+	// http://www.w3.org/TR/css3-selectors/#whitespace
+	whitespace = "[\\x20\\t\\r\\n\\f]",
+
+	// http://www.w3.org/TR/CSS21/syndata.html#value-def-identifier
+	identifier = "(?:\\\\.|[\\w-]|[^\0-\\xa0])+",
+
+	// Attribute selectors: http://www.w3.org/TR/selectors/#attribute-selectors
+	attributes = "\\[" + whitespace + "*(" + identifier + ")(?:" + whitespace +
+		// Operator (capture 2)
+		"*([*^$|!~]?=)" + whitespace +
+		// "Attribute values must be CSS identifiers [capture 5] or strings [capture 3 or capture 4]"
+		"*(?:'((?:\\\\.|[^\\\\'])*)'|\"((?:\\\\.|[^\\\\\"])*)\"|(" + identifier + "))|)" + whitespace +
+		"*\\]",
+
+	pseudos = ":(" + identifier + ")(?:\\((" +
+		// To reduce the number of selectors needing tokenize in the preFilter, prefer arguments:
+		// 1. quoted (capture 3; capture 4 or capture 5)
+		"('((?:\\\\.|[^\\\\'])*)'|\"((?:\\\\.|[^\\\\\"])*)\")|" +
+		// 2. simple (capture 6)
+		"((?:\\\\.|[^\\\\()[\\]]|" + attributes + ")*)|" +
+		// 3. anything else (capture 2)
+		".*" +
+		")\\)|)",
+
+	// Leading and non-escaped trailing whitespace, capturing some non-whitespace characters preceding the latter
+	rwhitespace = new RegExp( whitespace + "+", "g" ),
+	rtrim = new RegExp( "^" + whitespace + "+|((?:^|[^\\\\])(?:\\\\.)*)" + whitespace + "+$", "g" ),
+
+	rcomma = new RegExp( "^" + whitespace + "*," + whitespace + "*" ),
+	rcombinators = new RegExp( "^" + whitespace + "*([>+~]|" + whitespace + ")" + whitespace + "*" ),
+
+	rattributeQuotes = new RegExp( "=" + whitespace + "*([^\\]'\"]*?)" + whitespace + "*\\]", "g" ),
+
+	rpseudo = new RegExp( pseudos ),
+	ridentifier = new RegExp( "^" + identifier + "$" ),
+
+	matchExpr = {
+		"ID": new RegExp( "^#(" + identifier + ")" ),
+		"CLASS": new RegExp( "^\\.(" + identifier + ")" ),
+		"TAG": new RegExp( "^(" + identifier + "|[*])" ),
+		"ATTR": new RegExp( "^" + attributes ),
+		"PSEUDO": new RegExp( "^" + pseudos ),
+		"CHILD": new RegExp( "^:(only|first|last|nth|nth-last)-(child|of-type)(?:\\(" + whitespace +
+			"*(even|odd|(([+-]|)(\\d*)n|)" + whitespace + "*(?:([+-]|)" + whitespace +
+			"*(\\d+)|))" + whitespace + "*\\)|)", "i" ),
+		"bool": new RegExp( "^(?:" + booleans + ")$", "i" ),
+		// For use in libraries implementing .is()
+		// We use this for POS matching in `select`
+		"needsContext": new RegExp( "^" + whitespace + "*[>+~]|:(even|odd|eq|gt|lt|nth|first|last)(?:\\(" +
+			whitespace + "*((?:-\\d)?\\d*)" + whitespace + "*\\)|)(?=[^-]|$)", "i" )
+	},
+
+	rinputs = /^(?:input|select|textarea|button)$/i,
+	rheader = /^h\d$/i,
+
+	rnative = /^[^{]+\{\s*\[native \w/,
+
+	// Easily-parseable/retrievable ID or TAG or CLASS selectors
+	rquickExpr = /^(?:#([\w-]+)|(\w+)|\.([\w-]+))$/,
+
+	rsibling = /[+~]/,
+
+	// CSS escapes
+	// http://www.w3.org/TR/CSS21/syndata.html#escaped-characters
+	runescape = new RegExp( "\\\\([\\da-f]{1,6}" + whitespace + "?|(" + whitespace + ")|.)", "ig" ),
+	funescape = function( _, escaped, escapedWhitespace ) {
+		var high = "0x" + escaped - 0x10000;
+		// NaN means non-codepoint
+		// Support: Firefox<24
+		// Workaround erroneous numeric interpretation of +"0x"
+		return high !== high || escapedWhitespace ?
+			escaped :
+			high < 0 ?
+				// BMP codepoint
+				String.fromCharCode( high + 0x10000 ) :
+				// Supplemental Plane codepoint (surrogate pair)
+				String.fromCharCode( high >> 10 | 0xD800, high & 0x3FF | 0xDC00 );
+	},
+
+	// CSS string/identifier serialization
+	// https://drafts.csswg.org/cssom/#common-serializing-idioms
+	rcssescape = /([\0-\x1f\x7f]|^-?\d)|^-$|[^\x80-\uFFFF\w-]/g,
+	fcssescape = function( ch, asCodePoint ) {
+		if ( asCodePoint ) {
+
+			// U+0000 NULL becomes U+FFFD REPLACEMENT CHARACTER
+			if ( ch === "\0" ) {
+				return "\uFFFD";
+			}
+
+			// Control characters and (dependent upon position) numbers get escaped as code points
+			return ch.slice( 0, -1 ) + "\\" + ch.charCodeAt( ch.length - 1 ).toString( 16 ) + " ";
+		}
+
+		// Other potentially-special ASCII characters get backslash-escaped
+		return "\\" + ch;
+	},
+
+	// Used for iframes
+	// See setDocument()
+	// Removing the function wrapper causes a "Permission Denied"
+	// error in IE
+	unloadHandler = function() {
+		setDocument();
+	},
+
+	disabledAncestor = addCombinator(
+		function( elem ) {
+			return elem.disabled === true;
+		},
+		{ dir: "parentNode", next: "legend" }
+	);
+
+// Optimize for push.apply( _, NodeList )
+try {
+	push.apply(
+		(arr = slice.call( preferredDoc.childNodes )),
+		preferredDoc.childNodes
+	);
+	// Support: Android<4.0
+	// Detect silently failing push.apply
+	arr[ preferredDoc.childNodes.length ].nodeType;
+} catch ( e ) {
+	push = { apply: arr.length ?
+
+		// Leverage slice if possible
+		function( target, els ) {
+			push_native.apply( target, slice.call(els) );
+		} :
+
+		// Support: IE<9
+		// Otherwise append directly
+		function( target, els ) {
+			var j = target.length,
+				i = 0;
+			// Can't trust NodeList.length
+			while ( (target[j++] = els[i++]) ) {}
+			target.length = j - 1;
+		}
+	};
+}
+
+function Sizzle( selector, context, results, seed ) {
+	var m, i, elem, nid, match, groups, newSelector,
+		newContext = context && context.ownerDocument,
+
+		// nodeType defaults to 9, since context defaults to document
+		nodeType = context ? context.nodeType : 9;
+
+	results = results || [];
+
+	// Return early from calls with invalid selector or context
+	if ( typeof selector !== "string" || !selector ||
+		nodeType !== 1 && nodeType !== 9 && nodeType !== 11 ) {
+
+		return results;
+	}
+
+	// Try to shortcut find operations (as opposed to filters) in HTML documents
+	if ( !seed ) {
+
+		if ( ( context ? context.ownerDocument || context : preferredDoc ) !== document ) {
+			setDocument( context );
+		}
+		context = context || document;
+
+		if ( documentIsHTML ) {
+
+			// If the selector is sufficiently simple, try using a "get*By*" DOM method
+			// (excepting DocumentFragment context, where the methods don't exist)
+			if ( nodeType !== 11 && (match = rquickExpr.exec( selector )) ) {
+
+				// ID selector
+				if ( (m = match[1]) ) {
+
+					// Document context
+					if ( nodeType === 9 ) {
+						if ( (elem = context.getElementById( m )) ) {
+
+							// Support: IE, Opera, Webkit
+							// TODO: identify versions
+							// getElementById can match elements by name instead of ID
+							if ( elem.id === m ) {
+								results.push( elem );
+								return results;
+							}
+						} else {
+							return results;
+						}
+
+					// Element context
+					} else {
+
+						// Support: IE, Opera, Webkit
+						// TODO: identify versions
+						// getElementById can match elements by name instead of ID
+						if ( newContext && (elem = newContext.getElementById( m )) &&
+							contains( context, elem ) &&
+							elem.id === m ) {
+
+							results.push( elem );
+							return results;
+						}
+					}
+
+				// Type selector
+				} else if ( match[2] ) {
+					push.apply( results, context.getElementsByTagName( selector ) );
+					return results;
+
+				// Class selector
+				} else if ( (m = match[3]) && support.getElementsByClassName &&
+					context.getElementsByClassName ) {
+
+					push.apply( results, context.getElementsByClassName( m ) );
+					return results;
+				}
+			}
+
+			// Take advantage of querySelectorAll
+			if ( support.qsa &&
+				!compilerCache[ selector + " " ] &&
+				(!rbuggyQSA || !rbuggyQSA.test( selector )) ) {
+
+				if ( nodeType !== 1 ) {
+					newContext = context;
+					newSelector = selector;
+
+				// qSA looks outside Element context, which is not what we want
+				// Thanks to Andrew Dupont for this workaround technique
+				// Support: IE <=8
+				// Exclude object elements
+				} else if ( context.nodeName.toLowerCase() !== "object" ) {
+
+					// Capture the context ID, setting it first if necessary
+					if ( (nid = context.getAttribute( "id" )) ) {
+						nid = nid.replace( rcssescape, fcssescape );
+					} else {
+						context.setAttribute( "id", (nid = expando) );
+					}
+
+					// Prefix every selector in the list
+					groups = tokenize( selector );
+					i = groups.length;
+					while ( i-- ) {
+						groups[i] = "#" + nid + " " + toSelector( groups[i] );
+					}
+					newSelector = groups.join( "," );
+
+					// Expand context for sibling selectors
+					newContext = rsibling.test( selector ) && testContext( context.parentNode ) ||
+						context;
+				}
+
+				if ( newSelector ) {
+					try {
+						push.apply( results,
+							newContext.querySelectorAll( newSelector )
+						);
+						return results;
+					} catch ( qsaError ) {
+					} finally {
+						if ( nid === expando ) {
+							context.removeAttribute( "id" );
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// All others
+	return select( selector.replace( rtrim, "$1" ), context, results, seed );
+}
+
+/**
+ * Create key-value caches of limited size
+ * @returns {function(string, object)} Returns the Object data after storing it on itself with
+ *	property name the (space-suffixed) string and (if the cache is larger than Expr.cacheLength)
+ *	deleting the oldest entry
+ */
+function createCache() {
+	var keys = [];
+
+	function cache( key, value ) {
+		// Use (key + " ") to avoid collision with native prototype properties (see Issue #157)
+		if ( keys.push( key + " " ) > Expr.cacheLength ) {
+			// Only keep the most recent entries
+			delete cache[ keys.shift() ];
+		}
+		return (cache[ key + " " ] = value);
+	}
+	return cache;
+}
+
+/**
+ * Mark a function for special use by Sizzle
+ * @param {Function} fn The function to mark
+ */
+function markFunction( fn ) {
+	fn[ expando ] = true;
+	return fn;
+}
+
+/**
+ * Support testing using an element
+ * @param {Function} fn Passed the created element and returns a boolean result
+ */
+function assert( fn ) {
+	var el = document.createElement("fieldset");
+
+	try {
+		return !!fn( el );
+	} catch (e) {
+		return false;
+	} finally {
+		// Remove from its parent by default
+		if ( el.parentNode ) {
+			el.parentNode.removeChild( el );
+		}
+		// release memory in IE
+		el = null;
+	}
+}
+
+/**
+ * Adds the same handler for all of the specified attrs
+ * @param {String} attrs Pipe-separated list of attributes
+ * @param {Function} handler The method that will be applied
+ */
+function addHandle( attrs, handler ) {
+	var arr = attrs.split("|"),
+		i = arr.length;
+
+	while ( i-- ) {
+		Expr.attrHandle[ arr[i] ] = handler;
+	}
+}
+
+/**
+ * Checks document order of two siblings
+ * @param {Element} a
+ * @param {Element} b
+ * @returns {Number} Returns less than 0 if a precedes b, greater than 0 if a follows b
+ */
+function siblingCheck( a, b ) {
+	var cur = b && a,
+		diff = cur && a.nodeType === 1 && b.nodeType === 1 &&
+			a.sourceIndex - b.sourceIndex;
+
+	// Use IE sourceIndex if available on both nodes
+	if ( diff ) {
+		return diff;
+	}
+
+	// Check if b follows a
+	if ( cur ) {
+		while ( (cur = cur.nextSibling) ) {
+			if ( cur === b ) {
+				return -1;
+			}
+		}
+	}
+
+	return a ? 1 : -1;
+}
+
+/**
+ * Returns a function to use in pseudos for input types
+ * @param {String} type
+ */
+function createInputPseudo( type ) {
+	return function( elem ) {
+		var name = elem.nodeName.toLowerCase();
+		return name === "input" && elem.type === type;
+	};
+}
+
+/**
+ * Returns a function to use in pseudos for buttons
+ * @param {String} type
+ */
+function createButtonPseudo( type ) {
+	return function( elem ) {
+		var name = elem.nodeName.toLowerCase();
+		return (name === "input" || name === "button") && elem.type === type;
+	};
+}
+
+/**
+ * Returns a function to use in pseudos for :enabled/:disabled
+ * @param {Boolean} disabled true for :disabled; false for :enabled
+ */
+function createDisabledPseudo( disabled ) {
+	// Known :disabled false positives:
+	// IE: *[disabled]:not(button, input, select, textarea, optgroup, option, menuitem, fieldset)
+	// not IE: fieldset[disabled] > legend:nth-of-type(n+2) :can-disable
+	return function( elem ) {
+
+		// Check form elements and option elements for explicit disabling
+		return "label" in elem && elem.disabled === disabled ||
+			"form" in elem && elem.disabled === disabled ||
+
+			// Check non-disabled form elements for fieldset[disabled] ancestors
+			"form" in elem && elem.disabled === false && (
+				// Support: IE6-11+
+				// Ancestry is covered for us
+				elem.isDisabled === disabled ||
+
+				// Otherwise, assume any non-<option> under fieldset[disabled] is disabled
+				/* jshint -W018 */
+				elem.isDisabled !== !disabled &&
+					("label" in elem || !disabledAncestor( elem )) !== disabled
+			);
+	};
+}
+
+/**
+ * Returns a function to use in pseudos for positionals
+ * @param {Function} fn
+ */
+function createPositionalPseudo( fn ) {
+	return markFunction(function( argument ) {
+		argument = +argument;
+		return markFunction(function( seed, matches ) {
+			var j,
+				matchIndexes = fn( [], seed.length, argument ),
+				i = matchIndexes.length;
+
+			// Match elements found at the specified indexes
+			while ( i-- ) {
+				if ( seed[ (j = matchIndexes[i]) ] ) {
+					seed[j] = !(matches[j] = seed[j]);
+				}
+			}
+		});
+	});
+}
+
+/**
+ * Checks a node for validity as a Sizzle context
+ * @param {Element|Object=} context
+ * @returns {Element|Object|Boolean} The input node if acceptable, otherwise a falsy value
+ */
+function testContext( context ) {
+	return context && typeof context.getElementsByTagName !== "undefined" && context;
+}
+
+// Expose support vars for convenience
+support = Sizzle.support = {};
+
+/**
+ * Detects XML nodes
+ * @param {Element|Object} elem An element or a document
+ * @returns {Boolean} True iff elem is a non-HTML XML node
+ */
+isXML = Sizzle.isXML = function( elem ) {
+	// documentElement is verified for cases where it doesn't yet exist
+	// (such as loading iframes in IE - #4833)
+	var documentElement = elem && (elem.ownerDocument || elem).documentElement;
+	return documentElement ? documentElement.nodeName !== "HTML" : false;
+};
+
+/**
+ * Sets document-related variables once based on the current document
+ * @param {Element|Object} [doc] An element or document object to use to set the document
+ * @returns {Object} Returns the current document
+ */
+setDocument = Sizzle.setDocument = function( node ) {
+	var hasCompare, subWindow,
+		doc = node ? node.ownerDocument || node : preferredDoc;
+
+	// Return early if doc is invalid or already selected
+	if ( doc === document || doc.nodeType !== 9 || !doc.documentElement ) {
+		return document;
+	}
+
+	// Update global variables
+	document = doc;
+	docElem = document.documentElement;
+	documentIsHTML = !isXML( document );
+
+	// Support: IE 9-11, Edge
+	// Accessing iframe documents after unload throws "permission denied" errors (jQuery #13936)
+	if ( preferredDoc !== document &&
+		(subWindow = document.defaultView) && subWindow.top !== subWindow ) {
+
+		// Support: IE 11, Edge
+		if ( subWindow.addEventListener ) {
+			subWindow.addEventListener( "unload", unloadHandler, false );
+
+		// Support: IE 9 - 10 only
+		} else if ( subWindow.attachEvent ) {
+			subWindow.attachEvent( "onunload", unloadHandler );
+		}
+	}
+
+	/* Attributes
+	---------------------------------------------------------------------- */
+
+	// Support: IE<8
+	// Verify that getAttribute really returns attributes and not properties
+	// (excepting IE8 booleans)
+	support.attributes = assert(function( el ) {
+		el.className = "i";
+		return !el.getAttribute("className");
+	});
+
+	/* getElement(s)By*
+	---------------------------------------------------------------------- */
+
+	// Check if getElementsByTagName("*") returns only elements
+	support.getElementsByTagName = assert(function( el ) {
+		el.appendChild( document.createComment("") );
+		return !el.getElementsByTagName("*").length;
+	});
+
+	// Support: IE<9
+	support.getElementsByClassName = rnative.test( document.getElementsByClassName );
+
+	// Support: IE<10
+	// Check if getElementById returns elements by name
+	// The broken getElementById methods don't pick up programmatically-set names,
+	// so use a roundabout getElementsByName test
+	support.getById = assert(function( el ) {
+		docElem.appendChild( el ).id = expando;
+		return !document.getElementsByName || !document.getElementsByName( expando ).length;
+	});
+
+	// ID find and filter
+	if ( support.getById ) {
+		Expr.find["ID"] = function( id, context ) {
+			if ( typeof context.getElementById !== "undefined" && documentIsHTML ) {
+				var m = context.getElementById( id );
+				return m ? [ m ] : [];
+			}
+		};
+		Expr.filter["ID"] = function( id ) {
+			var attrId = id.replace( runescape, funescape );
+			return function( elem ) {
+				return elem.getAttribute("id") === attrId;
+			};
+		};
+	} else {
+		// Support: IE6/7
+		// getElementById is not reliable as a find shortcut
+		delete Expr.find["ID"];
+
+		Expr.filter["ID"] =  function( id ) {
+			var attrId = id.replace( runescape, funescape );
+			return function( elem ) {
+				var node = typeof elem.getAttributeNode !== "undefined" &&
+					elem.getAttributeNode("id");
+				return node && node.value === attrId;
+			};
+		};
+	}
+
+	// Tag
+	Expr.find["TAG"] = support.getElementsByTagName ?
+		function( tag, context ) {
+			if ( typeof context.getElementsByTagName !== "undefined" ) {
+				return context.getElementsByTagName( tag );
+
+			// DocumentFragment nodes don't have gEBTN
+			} else if ( support.qsa ) {
+				return context.querySelectorAll( tag );
+			}
+		} :
+
+		function( tag, context ) {
+			var elem,
+				tmp = [],
+				i = 0,
+				// By happy coincidence, a (broken) gEBTN appears on DocumentFragment nodes too
+				results = context.getElementsByTagName( tag );
+
+			// Filter out possible comments
+			if ( tag === "*" ) {
+				while ( (elem = results[i++]) ) {
+					if ( elem.nodeType === 1 ) {
+						tmp.push( elem );
+					}
+				}
+
+				return tmp;
+			}
+			return results;
+		};
+
+	// Class
+	Expr.find["CLASS"] = support.getElementsByClassName && function( className, context ) {
+		if ( typeof context.getElementsByClassName !== "undefined" && documentIsHTML ) {
+			return context.getElementsByClassName( className );
+		}
+	};
+
+	/* QSA/matchesSelector
+	---------------------------------------------------------------------- */
+
+	// QSA and matchesSelector support
+
+	// matchesSelector(:active) reports false when true (IE9/Opera 11.5)
+	rbuggyMatches = [];
+
+	// qSa(:focus) reports false when true (Chrome 21)
+	// We allow this because of a bug in IE8/9 that throws an error
+	// whenever `document.activeElement` is accessed on an iframe
+	// So, we allow :focus to pass through QSA all the time to avoid the IE error
+	// See https://bugs.jquery.com/ticket/13378
+	rbuggyQSA = [];
+
+	if ( (support.qsa = rnative.test( document.querySelectorAll )) ) {
+		// Build QSA regex
+		// Regex strategy adopted from Diego Perini
+		assert(function( el ) {
+			// Select is set to empty string on purpose
+			// This is to test IE's treatment of not explicitly
+			// setting a boolean content attribute,
+			// since its presence should be enough
+			// https://bugs.jquery.com/ticket/12359
+			docElem.appendChild( el ).innerHTML = "<a id='" + expando + "'></a>" +
+				"<select id='" + expando + "-\r\\' msallowcapture=''>" +
+				"<option selected=''></option></select>";
+
+			// Support: IE8, Opera 11-12.16
+			// Nothing should be selected when empty strings follow ^= or $= or *=
+			// The test attribute must be unknown in Opera but "safe" for WinRT
+			// https://msdn.microsoft.com/en-us/library/ie/hh465388.aspx#attribute_section
+			if ( el.querySelectorAll("[msallowcapture^='']").length ) {
+				rbuggyQSA.push( "[*^$]=" + whitespace + "*(?:''|\"\")" );
+			}
+
+			// Support: IE8
+			// Boolean attributes and "value" are not treated correctly
+			if ( !el.querySelectorAll("[selected]").length ) {
+				rbuggyQSA.push( "\\[" + whitespace + "*(?:value|" + booleans + ")" );
+			}
+
+			// Support: Chrome<29, Android<4.4, Safari<7.0+, iOS<7.0+, PhantomJS<1.9.8+
+			if ( !el.querySelectorAll( "[id~=" + expando + "-]" ).length ) {
+				rbuggyQSA.push("~=");
+			}
+
+			// Webkit/Opera - :checked should return selected option elements
+			// http://www.w3.org/TR/2011/REC-css3-selectors-20110929/#checked
+			// IE8 throws error here and will not see later tests
+			if ( !el.querySelectorAll(":checked").length ) {
+				rbuggyQSA.push(":checked");
+			}
+
+			// Support: Safari 8+, iOS 8+
+			// https://bugs.webkit.org/show_bug.cgi?id=136851
+			// In-page `selector#id sibling-combinator selector` fails
+			if ( !el.querySelectorAll( "a#" + expando + "+*" ).length ) {
+				rbuggyQSA.push(".#.+[+~]");
+			}
+		});
+
+		assert(function( el ) {
+			el.innerHTML = "<a href='' disabled='disabled'></a>" +
+				"<select disabled='disabled'><option/></select>";
+
+			// Support: Windows 8 Native Apps
+			// The type and name attributes are restricted during .innerHTML assignment
+			var input = document.createElement("input");
+			input.setAttribute( "type", "hidden" );
+			el.appendChild( input ).setAttribute( "name", "D" );
+
+			// Support: IE8
+			// Enforce case-sensitivity of name attribute
+			if ( el.querySelectorAll("[name=d]").length ) {
+				rbuggyQSA.push( "name" + whitespace + "*[*^$|!~]?=" );
+			}
+
+			// FF 3.5 - :enabled/:disabled and hidden elements (hidden elements are still enabled)
+			// IE8 throws error here and will not see later tests
+			if ( el.querySelectorAll(":enabled").length !== 2 ) {
+				rbuggyQSA.push( ":enabled", ":disabled" );
+			}
+
+			// Support: IE9-11+
+			// IE's :disabled selector does not pick up the children of disabled fieldsets
+			docElem.appendChild( el ).disabled = true;
+			if ( el.querySelectorAll(":disabled").length !== 2 ) {
+				rbuggyQSA.push( ":enabled", ":disabled" );
+			}
+
+			// Opera 10-11 does not throw on post-comma invalid pseudos
+			el.querySelectorAll("*,:x");
+			rbuggyQSA.push(",.*:");
+		});
+	}
+
+	if ( (support.matchesSelector = rnative.test( (matches = docElem.matches ||
+		docElem.webkitMatchesSelector ||
+		docElem.mozMatchesSelector ||
+		docElem.oMatchesSelector ||
+		docElem.msMatchesSelector) )) ) {
+
+		assert(function( el ) {
+			// Check to see if it's possible to do matchesSelector
+			// on a disconnected node (IE 9)
+			support.disconnectedMatch = matches.call( el, "*" );
+
+			// This should fail with an exception
+			// Gecko does not error, returns false instead
+			matches.call( el, "[s!='']:x" );
+			rbuggyMatches.push( "!=", pseudos );
+		});
+	}
+
+	rbuggyQSA = rbuggyQSA.length && new RegExp( rbuggyQSA.join("|") );
+	rbuggyMatches = rbuggyMatches.length && new RegExp( rbuggyMatches.join("|") );
+
+	/* Contains
+	---------------------------------------------------------------------- */
+	hasCompare = rnative.test( docElem.compareDocumentPosition );
+
+	// Element contains another
+	// Purposefully self-exclusive
+	// As in, an element does not contain itself
+	contains = hasCompare || rnative.test( docElem.contains ) ?
+		function( a, b ) {
+			var adown = a.nodeType === 9 ? a.documentElement : a,
+				bup = b && b.parentNode;
+			return a === bup || !!( bup && bup.nodeType === 1 && (
+				adown.contains ?
+					adown.contains( bup ) :
+					a.compareDocumentPosition && a.compareDocumentPosition( bup ) & 16
+			));
+		} :
+		function( a, b ) {
+			if ( b ) {
+				while ( (b = b.parentNode) ) {
+					if ( b === a ) {
+						return true;
+					}
+				}
+			}
+			return false;
+		};
+
+	/* Sorting
+	---------------------------------------------------------------------- */
+
+	// Document order sorting
+	sortOrder = hasCompare ?
+	function( a, b ) {
+
+		// Flag for duplicate removal
+		if ( a === b ) {
+			hasDuplicate = true;
+			return 0;
+		}
+
+		// Sort on method existence if only one input has compareDocumentPosition
+		var compare = !a.compareDocumentPosition - !b.compareDocumentPosition;
+		if ( compare ) {
+			return compare;
+		}
+
+		// Calculate position if both inputs belong to the same document
+		compare = ( a.ownerDocument || a ) === ( b.ownerDocument || b ) ?
+			a.compareDocumentPosition( b ) :
+
+			// Otherwise we know they are disconnected
+			1;
+
+		// Disconnected nodes
+		if ( compare & 1 ||
+			(!support.sortDetached && b.compareDocumentPosition( a ) === compare) ) {
+
+			// Choose the first element that is related to our preferred document
+			if ( a === document || a.ownerDocument === preferredDoc && contains(preferredDoc, a) ) {
+				return -1;
+			}
+			if ( b === document || b.ownerDocument === preferredDoc && contains(preferredDoc, b) ) {
+				return 1;
+			}
+
+			// Maintain original order
+			return sortInput ?
+				( indexOf( sortInput, a ) - indexOf( sortInput, b ) ) :
+				0;
+		}
+
+		return compare & 4 ? -1 : 1;
+	} :
+	function( a, b ) {
+		// Exit early if the nodes are identical
+		if ( a === b ) {
+			hasDuplicate = true;
+			return 0;
+		}
+
+		var cur,
+			i = 0,
+			aup = a.parentNode,
+			bup = b.parentNode,
+			ap = [ a ],
+			bp = [ b ];
+
+		// Parentless nodes are either documents or disconnected
+		if ( !aup || !bup ) {
+			return a === document ? -1 :
+				b === document ? 1 :
+				aup ? -1 :
+				bup ? 1 :
+				sortInput ?
+				( indexOf( sortInput, a ) - indexOf( sortInput, b ) ) :
+				0;
+
+		// If the nodes are siblings, we can do a quick check
+		} else if ( aup === bup ) {
+			return siblingCheck( a, b );
+		}
+
+		// Otherwise we need full lists of their ancestors for comparison
+		cur = a;
+		while ( (cur = cur.parentNode) ) {
+			ap.unshift( cur );
+		}
+		cur = b;
+		while ( (cur = cur.parentNode) ) {
+			bp.unshift( cur );
+		}
+
+		// Walk down the tree looking for a discrepancy
+		while ( ap[i] === bp[i] ) {
+			i++;
+		}
+
+		return i ?
+			// Do a sibling check if the nodes have a common ancestor
+			siblingCheck( ap[i], bp[i] ) :
+
+			// Otherwise nodes in our document sort first
+			ap[i] === preferredDoc ? -1 :
+			bp[i] === preferredDoc ? 1 :
+			0;
+	};
+
+	return document;
+};
+
+Sizzle.matches = function( expr, elements ) {
+	return Sizzle( expr, null, null, elements );
+};
+
+Sizzle.matchesSelector = function( elem, expr ) {
+	// Set document vars if needed
+	if ( ( elem.ownerDocument || elem ) !== document ) {
+		setDocument( elem );
+	}
+
+	// Make sure that attribute selectors are quoted
+	expr = expr.replace( rattributeQuotes, "='$1']" );
+
+	if ( support.matchesSelector && documentIsHTML &&
+		!compilerCache[ expr + " " ] &&
+		( !rbuggyMatches || !rbuggyMatches.test( expr ) ) &&
+		( !rbuggyQSA     || !rbuggyQSA.test( expr ) ) ) {
+
+		try {
+			var ret = matches.call( elem, expr );
+
+			// IE 9's matchesSelector returns false on disconnected nodes
+			if ( ret || support.disconnectedMatch ||
+					// As well, disconnected nodes are said to be in a document
+					// fragment in IE 9
+					elem.document && elem.document.nodeType !== 11 ) {
+				return ret;
+			}
+		} catch (e) {}
+	}
+
+	return Sizzle( expr, document, null, [ elem ] ).length > 0;
+};
+
+Sizzle.contains = function( context, elem ) {
+	// Set document vars if needed
+	if ( ( context.ownerDocument || context ) !== document ) {
+		setDocument( context );
+	}
+	return contains( context, elem );
+};
+
+Sizzle.attr = function( elem, name ) {
+	// Set document vars if needed
+	if ( ( elem.ownerDocument || elem ) !== document ) {
+		setDocument( elem );
+	}
+
+	var fn = Expr.attrHandle[ name.toLowerCase() ],
+		// Don't get fooled by Object.prototype properties (jQuery #13807)
+		val = fn && hasOwn.call( Expr.attrHandle, name.toLowerCase() ) ?
+			fn( elem, name, !documentIsHTML ) :
+			undefined;
+
+	return val !== undefined ?
+		val :
+		support.attributes || !documentIsHTML ?
+			elem.getAttribute( name ) :
+			(val = elem.getAttributeNode(name)) && val.specified ?
+				val.value :
+				null;
+};
+
+Sizzle.escape = function( sel ) {
+	return (sel + "").replace( rcssescape, fcssescape );
+};
+
+Sizzle.error = function( msg ) {
+	throw new Error( "Syntax error, unrecognized expression: " + msg );
+};
+
+/**
+ * Document sorting and removing duplicates
+ * @param {ArrayLike} results
+ */
+Sizzle.uniqueSort = function( results ) {
+	var elem,
+		duplicates = [],
+		j = 0,
+		i = 0;
+
+	// Unless we *know* we can detect duplicates, assume their presence
+	hasDuplicate = !support.detectDuplicates;
+	sortInput = !support.sortStable && results.slice( 0 );
+	results.sort( sortOrder );
+
+	if ( hasDuplicate ) {
+		while ( (elem = results[i++]) ) {
+			if ( elem === results[ i ] ) {
+				j = duplicates.push( i );
+			}
+		}
+		while ( j-- ) {
+			results.splice( duplicates[ j ], 1 );
+		}
+	}
+
+	// Clear input after sorting to release objects
+	// See https://github.com/jquery/sizzle/pull/225
+	sortInput = null;
+
+	return results;
+};
+
+/**
+ * Utility function for retrieving the text value of an array of DOM nodes
+ * @param {Array|Element} elem
+ */
+getText = Sizzle.getText = function( elem ) {
+	var node,
+		ret = "",
+		i = 0,
+		nodeType = elem.nodeType;
+
+	if ( !nodeType ) {
+		// If no nodeType, this is expected to be an array
+		while ( (node = elem[i++]) ) {
+			// Do not traverse comment nodes
+			ret += getText( node );
+		}
+	} else if ( nodeType === 1 || nodeType === 9 || nodeType === 11 ) {
+		// Use textContent for elements
+		// innerText usage removed for consistency of new lines (jQuery #11153)
+		if ( typeof elem.textContent === "string" ) {
+			return elem.textContent;
+		} else {
+			// Traverse its children
+			for ( elem = elem.firstChild; elem; elem = elem.nextSibling ) {
+				ret += getText( elem );
+			}
+		}
+	} else if ( nodeType === 3 || nodeType === 4 ) {
+		return elem.nodeValue;
+	}
+	// Do not include comment or processing instruction nodes
+
+	return ret;
+};
+
+Expr = Sizzle.selectors = {
+
+	// Can be adjusted by the user
+	cacheLength: 50,
+
+	createPseudo: markFunction,
+
+	match: matchExpr,
+
+	attrHandle: {},
+
+	find: {},
+
+	relative: {
+		">": { dir: "parentNode", first: true },
+		" ": { dir: "parentNode" },
+		"+": { dir: "previousSibling", first: true },
+		"~": { dir: "previousSibling" }
+	},
+
+	preFilter: {
+		"ATTR": function( match ) {
+			match[1] = match[1].replace( runescape, funescape );
+
+			// Move the given value to match[3] whether quoted or unquoted
+			match[3] = ( match[3] || match[4] || match[5] || "" ).replace( runescape, funescape );
+
+			if ( match[2] === "~=" ) {
+				match[3] = " " + match[3] + " ";
+			}
+
+			return match.slice( 0, 4 );
+		},
+
+		"CHILD": function( match ) {
+			/* matches from matchExpr["CHILD"]
+				1 type (only|nth|...)
+				2 what (child|of-type)
+				3 argument (even|odd|\d*|\d*n([+-]\d+)?|...)
+				4 xn-component of xn+y argument ([+-]?\d*n|)
+				5 sign of xn-component
+				6 x of xn-component
+				7 sign of y-component
+				8 y of y-component
+			*/
+			match[1] = match[1].toLowerCase();
+
+			if ( match[1].slice( 0, 3 ) === "nth" ) {
+				// nth-* requires argument
+				if ( !match[3] ) {
+					Sizzle.error( match[0] );
+				}
+
+				// numeric x and y parameters for Expr.filter.CHILD
+				// remember that false/true cast respectively to 0/1
+				match[4] = +( match[4] ? match[5] + (match[6] || 1) : 2 * ( match[3] === "even" || match[3] === "odd" ) );
+				match[5] = +( ( match[7] + match[8] ) || match[3] === "odd" );
+
+			// other types prohibit arguments
+			} else if ( match[3] ) {
+				Sizzle.error( match[0] );
+			}
+
+			return match;
+		},
+
+		"PSEUDO": function( match ) {
+			var excess,
+				unquoted = !match[6] && match[2];
+
+			if ( matchExpr["CHILD"].test( match[0] ) ) {
+				return null;
+			}
+
+			// Accept quoted arguments as-is
+			if ( match[3] ) {
+				match[2] = match[4] || match[5] || "";
+
+			// Strip excess characters from unquoted arguments
+			} else if ( unquoted && rpseudo.test( unquoted ) &&
+				// Get excess from tokenize (recursively)
+				(excess = tokenize( unquoted, true )) &&
+				// advance to the next closing parenthesis
+				(excess = unquoted.indexOf( ")", unquoted.length - excess ) - unquoted.length) ) {
+
+				// excess is a negative index
+				match[0] = match[0].slice( 0, excess );
+				match[2] = unquoted.slice( 0, excess );
+			}
+
+			// Return only captures needed by the pseudo filter method (type and argument)
+			return match.slice( 0, 3 );
+		}
+	},
+
+	filter: {
+
+		"TAG": function( nodeNameSelector ) {
+			var nodeName = nodeNameSelector.replace( runescape, funescape ).toLowerCase();
+			return nodeNameSelector === "*" ?
+				function() { return true; } :
+				function( elem ) {
+					return elem.nodeName && elem.nodeName.toLowerCase() === nodeName;
+				};
+		},
+
+		"CLASS": function( className ) {
+			var pattern = classCache[ className + " " ];
+
+			return pattern ||
+				(pattern = new RegExp( "(^|" + whitespace + ")" + className + "(" + whitespace + "|$)" )) &&
+				classCache( className, function( elem ) {
+					return pattern.test( typeof elem.className === "string" && elem.className || typeof elem.getAttribute !== "undefined" && elem.getAttribute("class") || "" );
+				});
+		},
+
+		"ATTR": function( name, operator, check ) {
+			return function( elem ) {
+				var result = Sizzle.attr( elem, name );
+
+				if ( result == null ) {
+					return operator === "!=";
+				}
+				if ( !operator ) {
+					return true;
+				}
+
+				result += "";
+
+				return operator === "=" ? result === check :
+					operator === "!=" ? result !== check :
+					operator === "^=" ? check && result.indexOf( check ) === 0 :
+					operator === "*=" ? check && result.indexOf( check ) > -1 :
+					operator === "$=" ? check && result.slice( -check.length ) === check :
+					operator === "~=" ? ( " " + result.replace( rwhitespace, " " ) + " " ).indexOf( check ) > -1 :
+					operator === "|=" ? result === check || result.slice( 0, check.length + 1 ) === check + "-" :
+					false;
+			};
+		},
+
+		"CHILD": function( type, what, argument, first, last ) {
+			var simple = type.slice( 0, 3 ) !== "nth",
+				forward = type.slice( -4 ) !== "last",
+				ofType = what === "of-type";
+
+			return first === 1 && last === 0 ?
+
+				// Shortcut for :nth-*(n)
+				function( elem ) {
+					return !!elem.parentNode;
+				} :
+
+				function( elem, context, xml ) {
+					var cache, uniqueCache, outerCache, node, nodeIndex, start,
+						dir = simple !== forward ? "nextSibling" : "previousSibling",
+						parent = elem.parentNode,
+						name = ofType && elem.nodeName.toLowerCase(),
+						useCache = !xml && !ofType,
+						diff = false;
+
+					if ( parent ) {
+
+						// :(first|last|only)-(child|of-type)
+						if ( simple ) {
+							while ( dir ) {
+								node = elem;
+								while ( (node = node[ dir ]) ) {
+									if ( ofType ?
+										node.nodeName.toLowerCase() === name :
+										node.nodeType === 1 ) {
+
+										return false;
+									}
+								}
+								// Reverse direction for :only-* (if we haven't yet done so)
+								start = dir = type === "only" && !start && "nextSibling";
+							}
+							return true;
+						}
+
+						start = [ forward ? parent.firstChild : parent.lastChild ];
+
+						// non-xml :nth-child(...) stores cache data on `parent`
+						if ( forward && useCache ) {
+
+							// Seek `elem` from a previously-cached index
+
+							// ...in a gzip-friendly way
+							node = parent;
+							outerCache = node[ expando ] || (node[ expando ] = {});
+
+							// Support: IE <9 only
+							// Defend against cloned attroperties (jQuery gh-1709)
+							uniqueCache = outerCache[ node.uniqueID ] ||
+								(outerCache[ node.uniqueID ] = {});
+
+							cache = uniqueCache[ type ] || [];
+							nodeIndex = cache[ 0 ] === dirruns && cache[ 1 ];
+							diff = nodeIndex && cache[ 2 ];
+							node = nodeIndex && parent.childNodes[ nodeIndex ];
+
+							while ( (node = ++nodeIndex && node && node[ dir ] ||
+
+								// Fallback to seeking `elem` from the start
+								(diff = nodeIndex = 0) || start.pop()) ) {
+
+								// When found, cache indexes on `parent` and break
+								if ( node.nodeType === 1 && ++diff && node === elem ) {
+									uniqueCache[ type ] = [ dirruns, nodeIndex, diff ];
+									break;
+								}
+							}
+
+						} else {
+							// Use previously-cached element index if available
+							if ( useCache ) {
+								// ...in a gzip-friendly way
+								node = elem;
+								outerCache = node[ expando ] || (node[ expando ] = {});
+
+								// Support: IE <9 only
+								// Defend against cloned attroperties (jQuery gh-1709)
+								uniqueCache = outerCache[ node.uniqueID ] ||
+									(outerCache[ node.uniqueID ] = {});
+
+								cache = uniqueCache[ type ] || [];
+								nodeIndex = cache[ 0 ] === dirruns && cache[ 1 ];
+								diff = nodeIndex;
+							}
+
+							// xml :nth-child(...)
+							// or :nth-last-child(...) or :nth(-last)?-of-type(...)
+							if ( diff === false ) {
+								// Use the same loop as above to seek `elem` from the start
+								while ( (node = ++nodeIndex && node && node[ dir ] ||
+									(diff = nodeIndex = 0) || start.pop()) ) {
+
+									if ( ( ofType ?
+										node.nodeName.toLowerCase() === name :
+										node.nodeType === 1 ) &&
+										++diff ) {
+
+										// Cache the index of each encountered element
+										if ( useCache ) {
+											outerCache = node[ expando ] || (node[ expando ] = {});
+
+											// Support: IE <9 only
+											// Defend against cloned attroperties (jQuery gh-1709)
+											uniqueCache = outerCache[ node.uniqueID ] ||
+												(outerCache[ node.uniqueID ] = {});
+
+											uniqueCache[ type ] = [ dirruns, diff ];
+										}
+
+										if ( node === elem ) {
+											break;
+										}
+									}
+								}
+							}
+						}
+
+						// Incorporate the offset, then check against cycle size
+						diff -= last;
+						return diff === first || ( diff % first === 0 && diff / first >= 0 );
+					}
+				};
+		},
+
+		"PSEUDO": function( pseudo, argument ) {
+			// pseudo-class names are case-insensitive
+			// http://www.w3.org/TR/selectors/#pseudo-classes
+			// Prioritize by case sensitivity in case custom pseudos are added with uppercase letters
+			// Remember that setFilters inherits from pseudos
+			var args,
+				fn = Expr.pseudos[ pseudo ] || Expr.setFilters[ pseudo.toLowerCase() ] ||
+					Sizzle.error( "unsupported pseudo: " + pseudo );
+
+			// The user may use createPseudo to indicate that
+			// arguments are needed to create the filter function
+			// just as Sizzle does
+			if ( fn[ expando ] ) {
+				return fn( argument );
+			}
+
+			// But maintain support for old signatures
+			if ( fn.length > 1 ) {
+				args = [ pseudo, pseudo, "", argument ];
+				return Expr.setFilters.hasOwnProperty( pseudo.toLowerCase() ) ?
+					markFunction(function( seed, matches ) {
+						var idx,
+							matched = fn( seed, argument ),
+							i = matched.length;
+						while ( i-- ) {
+							idx = indexOf( seed, matched[i] );
+							seed[ idx ] = !( matches[ idx ] = matched[i] );
+						}
+					}) :
+					function( elem ) {
+						return fn( elem, 0, args );
+					};
+			}
+
+			return fn;
+		}
+	},
+
+	pseudos: {
+		// Potentially complex pseudos
+		"not": markFunction(function( selector ) {
+			// Trim the selector passed to compile
+			// to avoid treating leading and trailing
+			// spaces as combinators
+			var input = [],
+				results = [],
+				matcher = compile( selector.replace( rtrim, "$1" ) );
+
+			return matcher[ expando ] ?
+				markFunction(function( seed, matches, context, xml ) {
+					var elem,
+						unmatched = matcher( seed, null, xml, [] ),
+						i = seed.length;
+
+					// Match elements unmatched by `matcher`
+					while ( i-- ) {
+						if ( (elem = unmatched[i]) ) {
+							seed[i] = !(matches[i] = elem);
+						}
+					}
+				}) :
+				function( elem, context, xml ) {
+					input[0] = elem;
+					matcher( input, null, xml, results );
+					// Don't keep the element (issue #299)
+					input[0] = null;
+					return !results.pop();
+				};
+		}),
+
+		"has": markFunction(function( selector ) {
+			return function( elem ) {
+				return Sizzle( selector, elem ).length > 0;
+			};
+		}),
+
+		"contains": markFunction(function( text ) {
+			text = text.replace( runescape, funescape );
+			return function( elem ) {
+				return ( elem.textContent || elem.innerText || getText( elem ) ).indexOf( text ) > -1;
+			};
+		}),
+
+		// "Whether an element is represented by a :lang() selector
+		// is based solely on the element's language value
+		// being equal to the identifier C,
+		// or beginning with the identifier C immediately followed by "-".
+		// The matching of C against the element's language value is performed case-insensitively.
+		// The identifier C does not have to be a valid language name."
+		// http://www.w3.org/TR/selectors/#lang-pseudo
+		"lang": markFunction( function( lang ) {
+			// lang value must be a valid identifier
+			if ( !ridentifier.test(lang || "") ) {
+				Sizzle.error( "unsupported lang: " + lang );
+			}
+			lang = lang.replace( runescape, funescape ).toLowerCase();
+			return function( elem ) {
+				var elemLang;
+				do {
+					if ( (elemLang = documentIsHTML ?
+						elem.lang :
+						elem.getAttribute("xml:lang") || elem.getAttribute("lang")) ) {
+
+						elemLang = elemLang.toLowerCase();
+						return elemLang === lang || elemLang.indexOf( lang + "-" ) === 0;
+					}
+				} while ( (elem = elem.parentNode) && elem.nodeType === 1 );
+				return false;
+			};
+		}),
+
+		// Miscellaneous
+		"target": function( elem ) {
+			var hash = window.location && window.location.hash;
+			return hash && hash.slice( 1 ) === elem.id;
+		},
+
+		"root": function( elem ) {
+			return elem === docElem;
+		},
+
+		"focus": function( elem ) {
+			return elem === document.activeElement && (!document.hasFocus || document.hasFocus()) && !!(elem.type || elem.href || ~elem.tabIndex);
+		},
+
+		// Boolean properties
+		"enabled": createDisabledPseudo( false ),
+		"disabled": createDisabledPseudo( true ),
+
+		"checked": function( elem ) {
+			// In CSS3, :checked should return both checked and selected elements
+			// http://www.w3.org/TR/2011/REC-css3-selectors-20110929/#checked
+			var nodeName = elem.nodeName.toLowerCase();
+			return (nodeName === "input" && !!elem.checked) || (nodeName === "option" && !!elem.selected);
+		},
+
+		"selected": function( elem ) {
+			// Accessing this property makes selected-by-default
+			// options in Safari work properly
+			if ( elem.parentNode ) {
+				elem.parentNode.selectedIndex;
+			}
+
+			return elem.selected === true;
+		},
+
+		// Contents
+		"empty": function( elem ) {
+			// http://www.w3.org/TR/selectors/#empty-pseudo
+			// :empty is negated by element (1) or content nodes (text: 3; cdata: 4; entity ref: 5),
+			//   but not by others (comment: 8; processing instruction: 7; etc.)
+			// nodeType < 6 works because attributes (2) do not appear as children
+			for ( elem = elem.firstChild; elem; elem = elem.nextSibling ) {
+				if ( elem.nodeType < 6 ) {
+					return false;
+				}
+			}
+			return true;
+		},
+
+		"parent": function( elem ) {
+			return !Expr.pseudos["empty"]( elem );
+		},
+
+		// Element/input types
+		"header": function( elem ) {
+			return rheader.test( elem.nodeName );
+		},
+
+		"input": function( elem ) {
+			return rinputs.test( elem.nodeName );
+		},
+
+		"button": function( elem ) {
+			var name = elem.nodeName.toLowerCase();
+			return name === "input" && elem.type === "button" || name === "button";
+		},
+
+		"text": function( elem ) {
+			var attr;
+			return elem.nodeName.toLowerCase() === "input" &&
+				elem.type === "text" &&
+
+				// Support: IE<8
+				// New HTML5 attribute values (e.g., "search") appear with elem.type === "text"
+				( (attr = elem.getAttribute("type")) == null || attr.toLowerCase() === "text" );
+		},
+
+		// Position-in-collection
+		"first": createPositionalPseudo(function() {
+			return [ 0 ];
+		}),
+
+		"last": createPositionalPseudo(function( matchIndexes, length ) {
+			return [ length - 1 ];
+		}),
+
+		"eq": createPositionalPseudo(function( matchIndexes, length, argument ) {
+			return [ argument < 0 ? argument + length : argument ];
+		}),
+
+		"even": createPositionalPseudo(function( matchIndexes, length ) {
+			var i = 0;
+			for ( ; i < length; i += 2 ) {
+				matchIndexes.push( i );
+			}
+			return matchIndexes;
+		}),
+
+		"odd": createPositionalPseudo(function( matchIndexes, length ) {
+			var i = 1;
+			for ( ; i < length; i += 2 ) {
+				matchIndexes.push( i );
+			}
+			return matchIndexes;
+		}),
+
+		"lt": createPositionalPseudo(function( matchIndexes, length, argument ) {
+			var i = argument < 0 ? argument + length : argument;
+			for ( ; --i >= 0; ) {
+				matchIndexes.push( i );
+			}
+			return matchIndexes;
+		}),
+
+		"gt": createPositionalPseudo(function( matchIndexes, length, argument ) {
+			var i = argument < 0 ? argument + length : argument;
+			for ( ; ++i < length; ) {
+				matchIndexes.push( i );
+			}
+			return matchIndexes;
+		})
+	}
+};
+
+Expr.pseudos["nth"] = Expr.pseudos["eq"];
+
+// Add button/input type pseudos
+for ( i in { radio: true, checkbox: true, file: true, password: true, image: true } ) {
+	Expr.pseudos[ i ] = createInputPseudo( i );
+}
+for ( i in { submit: true, reset: true } ) {
+	Expr.pseudos[ i ] = createButtonPseudo( i );
+}
+
+// Easy API for creating new setFilters
+function setFilters() {}
+setFilters.prototype = Expr.filters = Expr.pseudos;
+Expr.setFilters = new setFilters();
+
+tokenize = Sizzle.tokenize = function( selector, parseOnly ) {
+	var matched, match, tokens, type,
+		soFar, groups, preFilters,
+		cached = tokenCache[ selector + " " ];
+
+	if ( cached ) {
+		return parseOnly ? 0 : cached.slice( 0 );
+	}
+
+	soFar = selector;
+	groups = [];
+	preFilters = Expr.preFilter;
+
+	while ( soFar ) {
+
+		// Comma and first run
+		if ( !matched || (match = rcomma.exec( soFar )) ) {
+			if ( match ) {
+				// Don't consume trailing commas as valid
+				soFar = soFar.slice( match[0].length ) || soFar;
+			}
+			groups.push( (tokens = []) );
+		}
+
+		matched = false;
+
+		// Combinators
+		if ( (match = rcombinators.exec( soFar )) ) {
+			matched = match.shift();
+			tokens.push({
+				value: matched,
+				// Cast descendant combinators to space
+				type: match[0].replace( rtrim, " " )
+			});
+			soFar = soFar.slice( matched.length );
+		}
+
+		// Filters
+		for ( type in Expr.filter ) {
+			if ( (match = matchExpr[ type ].exec( soFar )) && (!preFilters[ type ] ||
+				(match = preFilters[ type ]( match ))) ) {
+				matched = match.shift();
+				tokens.push({
+					value: matched,
+					type: type,
+					matches: match
+				});
+				soFar = soFar.slice( matched.length );
+			}
+		}
+
+		if ( !matched ) {
+			break;
+		}
+	}
+
+	// Return the length of the invalid excess
+	// if we're just parsing
+	// Otherwise, throw an error or return tokens
+	return parseOnly ?
+		soFar.length :
+		soFar ?
+			Sizzle.error( selector ) :
+			// Cache the tokens
+			tokenCache( selector, groups ).slice( 0 );
+};
+
+function toSelector( tokens ) {
+	var i = 0,
+		len = tokens.length,
+		selector = "";
+	for ( ; i < len; i++ ) {
+		selector += tokens[i].value;
+	}
+	return selector;
+}
+
+function addCombinator( matcher, combinator, base ) {
+	var dir = combinator.dir,
+		skip = combinator.next,
+		key = skip || dir,
+		checkNonElements = base && key === "parentNode",
+		doneName = done++;
+
+	return combinator.first ?
+		// Check against closest ancestor/preceding element
+		function( elem, context, xml ) {
+			while ( (elem = elem[ dir ]) ) {
+				if ( elem.nodeType === 1 || checkNonElements ) {
+					return matcher( elem, context, xml );
+				}
+			}
+		} :
+
+		// Check against all ancestor/preceding elements
+		function( elem, context, xml ) {
+			var oldCache, uniqueCache, outerCache,
+				newCache = [ dirruns, doneName ];
+
+			// We can't set arbitrary data on XML nodes, so they don't benefit from combinator caching
+			if ( xml ) {
+				while ( (elem = elem[ dir ]) ) {
+					if ( elem.nodeType === 1 || checkNonElements ) {
+						if ( matcher( elem, context, xml ) ) {
+							return true;
+						}
+					}
+				}
+			} else {
+				while ( (elem = elem[ dir ]) ) {
+					if ( elem.nodeType === 1 || checkNonElements ) {
+						outerCache = elem[ expando ] || (elem[ expando ] = {});
+
+						// Support: IE <9 only
+						// Defend against cloned attroperties (jQuery gh-1709)
+						uniqueCache = outerCache[ elem.uniqueID ] || (outerCache[ elem.uniqueID ] = {});
+
+						if ( skip && skip === elem.nodeName.toLowerCase() ) {
+							elem = elem[ dir ] || elem;
+						} else if ( (oldCache = uniqueCache[ key ]) &&
+							oldCache[ 0 ] === dirruns && oldCache[ 1 ] === doneName ) {
+
+							// Assign to newCache so results back-propagate to previous elements
+							return (newCache[ 2 ] = oldCache[ 2 ]);
+						} else {
+							// Reuse newcache so results back-propagate to previous elements
+							uniqueCache[ key ] = newCache;
+
+							// A match means we're done; a fail means we have to keep checking
+							if ( (newCache[ 2 ] = matcher( elem, context, xml )) ) {
+								return true;
+							}
+						}
+					}
+				}
+			}
+		};
+}
+
+function elementMatcher( matchers ) {
+	return matchers.length > 1 ?
+		function( elem, context, xml ) {
+			var i = matchers.length;
+			while ( i-- ) {
+				if ( !matchers[i]( elem, context, xml ) ) {
+					return false;
+				}
+			}
+			return true;
+		} :
+		matchers[0];
+}
+
+function multipleContexts( selector, contexts, results ) {
+	var i = 0,
+		len = contexts.length;
+	for ( ; i < len; i++ ) {
+		Sizzle( selector, contexts[i], results );
+	}
+	return results;
+}
+
+function condense( unmatched, map, filter, context, xml ) {
+	var elem,
+		newUnmatched = [],
+		i = 0,
+		len = unmatched.length,
+		mapped = map != null;
+
+	for ( ; i < len; i++ ) {
+		if ( (elem = unmatched[i]) ) {
+			if ( !filter || filter( elem, context, xml ) ) {
+				newUnmatched.push( elem );
+				if ( mapped ) {
+					map.push( i );
+				}
+			}
+		}
+	}
+
+	return newUnmatched;
+}
+
+function setMatcher( preFilter, selector, matcher, postFilter, postFinder, postSelector ) {
+	if ( postFilter && !postFilter[ expando ] ) {
+		postFilter = setMatcher( postFilter );
+	}
+	if ( postFinder && !postFinder[ expando ] ) {
+		postFinder = setMatcher( postFinder, postSelector );
+	}
+	return markFunction(function( seed, results, context, xml ) {
+		var temp, i, elem,
+			preMap = [],
+			postMap = [],
+			preexisting = results.length,
+
+			// Get initial elements from seed or context
+			elems = seed || multipleContexts( selector || "*", context.nodeType ? [ context ] : context, [] ),
+
+			// Prefilter to get matcher input, preserving a map for seed-results synchronization
+			matcherIn = preFilter && ( seed || !selector ) ?
+				condense( elems, preMap, preFilter, context, xml ) :
+				elems,
+
+			matcherOut = matcher ?
+				// If we have a postFinder, or filtered seed, or non-seed postFilter or preexisting results,
+				postFinder || ( seed ? preFilter : preexisting || postFilter ) ?
+
+					// ...intermediate processing is necessary
+					[] :
+
+					// ...otherwise use results directly
+					results :
+				matcherIn;
+
+		// Find primary matches
+		if ( matcher ) {
+			matcher( matcherIn, matcherOut, context, xml );
+		}
+
+		// Apply postFilter
+		if ( postFilter ) {
+			temp = condense( matcherOut, postMap );
+			postFilter( temp, [], context, xml );
+
+			// Un-match failing elements by moving them back to matcherIn
+			i = temp.length;
+			while ( i-- ) {
+				if ( (elem = temp[i]) ) {
+					matcherOut[ postMap[i] ] = !(matcherIn[ postMap[i] ] = elem);
+				}
+			}
+		}
+
+		if ( seed ) {
+			if ( postFinder || preFilter ) {
+				if ( postFinder ) {
+					// Get the final matcherOut by condensing this intermediate into postFinder contexts
+					temp = [];
+					i = matcherOut.length;
+					while ( i-- ) {
+						if ( (elem = matcherOut[i]) ) {
+							// Restore matcherIn since elem is not yet a final match
+							temp.push( (matcherIn[i] = elem) );
+						}
+					}
+					postFinder( null, (matcherOut = []), temp, xml );
+				}
+
+				// Move matched elements from seed to results to keep them synchronized
+				i = matcherOut.length;
+				while ( i-- ) {
+					if ( (elem = matcherOut[i]) &&
+						(temp = postFinder ? indexOf( seed, elem ) : preMap[i]) > -1 ) {
+
+						seed[temp] = !(results[temp] = elem);
+					}
+				}
+			}
+
+		// Add elements to results, through postFinder if defined
+		} else {
+			matcherOut = condense(
+				matcherOut === results ?
+					matcherOut.splice( preexisting, matcherOut.length ) :
+					matcherOut
+			);
+			if ( postFinder ) {
+				postFinder( null, results, matcherOut, xml );
+			} else {
+				push.apply( results, matcherOut );
+			}
+		}
+	});
+}
+
+function matcherFromTokens( tokens ) {
+	var checkContext, matcher, j,
+		len = tokens.length,
+		leadingRelative = Expr.relative[ tokens[0].type ],
+		implicitRelative = leadingRelative || Expr.relative[" "],
+		i = leadingRelative ? 1 : 0,
+
+		// The foundational matcher ensures that elements are reachable from top-level context(s)
+		matchContext = addCombinator( function( elem ) {
+			return elem === checkContext;
+		}, implicitRelative, true ),
+		matchAnyContext = addCombinator( function( elem ) {
+			return indexOf( checkContext, elem ) > -1;
+		}, implicitRelative, true ),
+		matchers = [ function( elem, context, xml ) {
+			var ret = ( !leadingRelative && ( xml || context !== outermostContext ) ) || (
+				(checkContext = context).nodeType ?
+					matchContext( elem, context, xml ) :
+					matchAnyContext( elem, context, xml ) );
+			// Avoid hanging onto element (issue #299)
+			checkContext = null;
+			return ret;
+		} ];
+
+	for ( ; i < len; i++ ) {
+		if ( (matcher = Expr.relative[ tokens[i].type ]) ) {
+			matchers = [ addCombinator(elementMatcher( matchers ), matcher) ];
+		} else {
+			matcher = Expr.filter[ tokens[i].type ].apply( null, tokens[i].matches );
+
+			// Return special upon seeing a positional matcher
+			if ( matcher[ expando ] ) {
+				// Find the next relative operator (if any) for proper handling
+				j = ++i;
+				for ( ; j < len; j++ ) {
+					if ( Expr.relative[ tokens[j].type ] ) {
+						break;
+					}
+				}
+				return setMatcher(
+					i > 1 && elementMatcher( matchers ),
+					i > 1 && toSelector(
+						// If the preceding token was a descendant combinator, insert an implicit any-element `*`
+						tokens.slice( 0, i - 1 ).concat({ value: tokens[ i - 2 ].type === " " ? "*" : "" })
+					).replace( rtrim, "$1" ),
+					matcher,
+					i < j && matcherFromTokens( tokens.slice( i, j ) ),
+					j < len && matcherFromTokens( (tokens = tokens.slice( j )) ),
+					j < len && toSelector( tokens )
+				);
+			}
+			matchers.push( matcher );
+		}
+	}
+
+	return elementMatcher( matchers );
+}
+
+function matcherFromGroupMatchers( elementMatchers, setMatchers ) {
+	var bySet = setMatchers.length > 0,
+		byElement = elementMatchers.length > 0,
+		superMatcher = function( seed, context, xml, results, outermost ) {
+			var elem, j, matcher,
+				matchedCount = 0,
+				i = "0",
+				unmatched = seed && [],
+				setMatched = [],
+				contextBackup = outermostContext,
+				// We must always have either seed elements or outermost context
+				elems = seed || byElement && Expr.find["TAG"]( "*", outermost ),
+				// Use integer dirruns iff this is the outermost matcher
+				dirrunsUnique = (dirruns += contextBackup == null ? 1 : Math.random() || 0.1),
+				len = elems.length;
+
+			if ( outermost ) {
+				outermostContext = context === document || context || outermost;
+			}
+
+			// Add elements passing elementMatchers directly to results
+			// Support: IE<9, Safari
+			// Tolerate NodeList properties (IE: "length"; Safari: <number>) matching elements by id
+			for ( ; i !== len && (elem = elems[i]) != null; i++ ) {
+				if ( byElement && elem ) {
+					j = 0;
+					if ( !context && elem.ownerDocument !== document ) {
+						setDocument( elem );
+						xml = !documentIsHTML;
+					}
+					while ( (matcher = elementMatchers[j++]) ) {
+						if ( matcher( elem, context || document, xml) ) {
+							results.push( elem );
+							break;
+						}
+					}
+					if ( outermost ) {
+						dirruns = dirrunsUnique;
+					}
+				}
+
+				// Track unmatched elements for set filters
+				if ( bySet ) {
+					// They will have gone through all possible matchers
+					if ( (elem = !matcher && elem) ) {
+						matchedCount--;
+					}
+
+					// Lengthen the array for every element, matched or not
+					if ( seed ) {
+						unmatched.push( elem );
+					}
+				}
+			}
+
+			// `i` is now the count of elements visited above, and adding it to `matchedCount`
+			// makes the latter nonnegative.
+			matchedCount += i;
+
+			// Apply set filters to unmatched elements
+			// NOTE: This can be skipped if there are no unmatched elements (i.e., `matchedCount`
+			// equals `i`), unless we didn't visit _any_ elements in the above loop because we have
+			// no element matchers and no seed.
+			// Incrementing an initially-string "0" `i` allows `i` to remain a string only in that
+			// case, which will result in a "00" `matchedCount` that differs from `i` but is also
+			// numerically zero.
+			if ( bySet && i !== matchedCount ) {
+				j = 0;
+				while ( (matcher = setMatchers[j++]) ) {
+					matcher( unmatched, setMatched, context, xml );
+				}
+
+				if ( seed ) {
+					// Reintegrate element matches to eliminate the need for sorting
+					if ( matchedCount > 0 ) {
+						while ( i-- ) {
+							if ( !(unmatched[i] || setMatched[i]) ) {
+								setMatched[i] = pop.call( results );
+							}
+						}
+					}
+
+					// Discard index placeholder values to get only actual matches
+					setMatched = condense( setMatched );
+				}
+
+				// Add matches to results
+				push.apply( results, setMatched );
+
+				// Seedless set matches succeeding multiple successful matchers stipulate sorting
+				if ( outermost && !seed && setMatched.length > 0 &&
+					( matchedCount + setMatchers.length ) > 1 ) {
+
+					Sizzle.uniqueSort( results );
+				}
+			}
+
+			// Override manipulation of globals by nested matchers
+			if ( outermost ) {
+				dirruns = dirrunsUnique;
+				outermostContext = contextBackup;
+			}
+
+			return unmatched;
+		};
+
+	return bySet ?
+		markFunction( superMatcher ) :
+		superMatcher;
+}
+
+compile = Sizzle.compile = function( selector, match /* Internal Use Only */ ) {
+	var i,
+		setMatchers = [],
+		elementMatchers = [],
+		cached = compilerCache[ selector + " " ];
+
+	if ( !cached ) {
+		// Generate a function of recursive functions that can be used to check each element
+		if ( !match ) {
+			match = tokenize( selector );
+		}
+		i = match.length;
+		while ( i-- ) {
+			cached = matcherFromTokens( match[i] );
+			if ( cached[ expando ] ) {
+				setMatchers.push( cached );
+			} else {
+				elementMatchers.push( cached );
+			}
+		}
+
+		// Cache the compiled function
+		cached = compilerCache( selector, matcherFromGroupMatchers( elementMatchers, setMatchers ) );
+
+		// Save selector and tokenization
+		cached.selector = selector;
+	}
+	return cached;
+};
+
+/**
+ * A low-level selection function that works with Sizzle's compiled
+ *  selector functions
+ * @param {String|Function} selector A selector or a pre-compiled
+ *  selector function built with Sizzle.compile
+ * @param {Element} context
+ * @param {Array} [results]
+ * @param {Array} [seed] A set of elements to match against
+ */
+select = Sizzle.select = function( selector, context, results, seed ) {
+	var i, tokens, token, type, find,
+		compiled = typeof selector === "function" && selector,
+		match = !seed && tokenize( (selector = compiled.selector || selector) );
+
+	results = results || [];
+
+	// Try to minimize operations if there is only one selector in the list and no seed
+	// (the latter of which guarantees us context)
+	if ( match.length === 1 ) {
+
+		// Reduce context if the leading compound selector is an ID
+		tokens = match[0] = match[0].slice( 0 );
+		if ( tokens.length > 2 && (token = tokens[0]).type === "ID" &&
+				support.getById && context.nodeType === 9 && documentIsHTML &&
+				Expr.relative[ tokens[1].type ] ) {
+
+			context = ( Expr.find["ID"]( token.matches[0].replace(runescape, funescape), context ) || [] )[0];
+			if ( !context ) {
+				return results;
+
+			// Precompiled matchers will still verify ancestry, so step up a level
+			} else if ( compiled ) {
+				context = context.parentNode;
+			}
+
+			selector = selector.slice( tokens.shift().value.length );
+		}
+
+		// Fetch a seed set for right-to-left matching
+		i = matchExpr["needsContext"].test( selector ) ? 0 : tokens.length;
+		while ( i-- ) {
+			token = tokens[i];
+
+			// Abort if we hit a combinator
+			if ( Expr.relative[ (type = token.type) ] ) {
+				break;
+			}
+			if ( (find = Expr.find[ type ]) ) {
+				// Search, expanding context for leading sibling combinators
+				if ( (seed = find(
+					token.matches[0].replace( runescape, funescape ),
+					rsibling.test( tokens[0].type ) && testContext( context.parentNode ) || context
+				)) ) {
+
+					// If seed is empty or no tokens remain, we can return early
+					tokens.splice( i, 1 );
+					selector = seed.length && toSelector( tokens );
+					if ( !selector ) {
+						push.apply( results, seed );
+						return results;
+					}
+
+					break;
+				}
+			}
+		}
+	}
+
+	// Compile and execute a filtering function if one is not provided
+	// Provide `match` to avoid retokenization if we modified the selector above
+	( compiled || compile( selector, match ) )(
+		seed,
+		context,
+		!documentIsHTML,
+		results,
+		!context || rsibling.test( selector ) && testContext( context.parentNode ) || context
+	);
+	return results;
+};
+
+// One-time assignments
+
+// Sort stability
+support.sortStable = expando.split("").sort( sortOrder ).join("") === expando;
+
+// Support: Chrome 14-35+
+// Always assume duplicates if they aren't passed to the comparison function
+support.detectDuplicates = !!hasDuplicate;
+
+// Initialize against the default document
+setDocument();
+
+// Support: Webkit<537.32 - Safari 6.0.3/Chrome 25 (fixed in Chrome 27)
+// Detached nodes confoundingly follow *each other*
+support.sortDetached = assert(function( el ) {
+	// Should return 1, but returns 4 (following)
+	return el.compareDocumentPosition( document.createElement("fieldset") ) & 1;
+});
+
+// Support: IE<8
+// Prevent attribute/property "interpolation"
+// https://msdn.microsoft.com/en-us/library/ms536429%28VS.85%29.aspx
+if ( !assert(function( el ) {
+	el.innerHTML = "<a href='#'></a>";
+	return el.firstChild.getAttribute("href") === "#" ;
+}) ) {
+	addHandle( "type|href|height|width", function( elem, name, isXML ) {
+		if ( !isXML ) {
+			return elem.getAttribute( name, name.toLowerCase() === "type" ? 1 : 2 );
+		}
+	});
+}
+
+// Support: IE<9
+// Use defaultValue in place of getAttribute("value")
+if ( !support.attributes || !assert(function( el ) {
+	el.innerHTML = "<input/>";
+	el.firstChild.setAttribute( "value", "" );
+	return el.firstChild.getAttribute( "value" ) === "";
+}) ) {
+	addHandle( "value", function( elem, name, isXML ) {
+		if ( !isXML && elem.nodeName.toLowerCase() === "input" ) {
+			return elem.defaultValue;
+		}
+	});
+}
+
+// Support: IE<9
+// Use getAttributeNode to fetch booleans when getAttribute lies
+if ( !assert(function( el ) {
+	return el.getAttribute("disabled") == null;
+}) ) {
+	addHandle( booleans, function( elem, name, isXML ) {
+		var val;
+		if ( !isXML ) {
+			return elem[ name ] === true ? name.toLowerCase() :
+					(val = elem.getAttributeNode( name )) && val.specified ?
+					val.value :
+				null;
+		}
+	});
+}
+
+return Sizzle;
+
+})( window );
+
+
+
+jQuery.find = Sizzle;
+jQuery.expr = Sizzle.selectors;
+
+// Deprecated
+jQuery.expr[ ":" ] = jQuery.expr.pseudos;
+jQuery.uniqueSort = jQuery.unique = Sizzle.uniqueSort;
+jQuery.text = Sizzle.getText;
+jQuery.isXMLDoc = Sizzle.isXML;
+jQuery.contains = Sizzle.contains;
+jQuery.escapeSelector = Sizzle.escape;
+
+
+
+
+var dir = function( elem, dir, until ) {
+	var matched = [],
+		truncate = until !== undefined;
+
+	while ( ( elem = elem[ dir ] ) && elem.nodeType !== 9 ) {
+		if ( elem.nodeType === 1 ) {
+			if ( truncate && jQuery( elem ).is( until ) ) {
+				break;
+			}
+			matched.push( elem );
+		}
+	}
+	return matched;
+};
+
+
+var siblings = function( n, elem ) {
+	var matched = [];
+
+	for ( ; n; n = n.nextSibling ) {
+		if ( n.nodeType === 1 && n !== elem ) {
+			matched.push( n );
+		}
+	}
+
+	return matched;
+};
+
+
+var rneedsContext = jQuery.expr.match.needsContext;
+
+var rsingleTag = ( /^<([a-z][^\/\0>:\x20\t\r\n\f]*)[\x20\t\r\n\f]*\/?>(?:<\/\1>|)$/i );
+
+
+
+var risSimple = /^.[^:#\[\.,]*$/;
+
+// Implement the identical functionality for filter and not
+function winnow( elements, qualifier, not ) {
+	if ( jQuery.isFunction( qualifier ) ) {
+		return jQuery.grep( elements, function( elem, i ) {
+			return !!qualifier.call( elem, i, elem ) !== not;
+		} );
+
+	}
+
+	if ( qualifier.nodeType ) {
+		return jQuery.grep( elements, function( elem ) {
+			return ( elem === qualifier ) !== not;
+		} );
+
+	}
+
+	if ( typeof qualifier === "string" ) {
+		if ( risSimple.test( qualifier ) ) {
+			return jQuery.filter( qualifier, elements, not );
+		}
+
+		qualifier = jQuery.filter( qualifier, elements );
+	}
+
+	return jQuery.grep( elements, function( elem ) {
+		return ( indexOf.call( qualifier, elem ) > -1 ) !== not && elem.nodeType === 1;
+	} );
+}
+
+jQuery.filter = function( expr, elems, not ) {
+	var elem = elems[ 0 ];
+
+	if ( not ) {
+		expr = ":not(" + expr + ")";
+	}
+
+	return elems.length === 1 && elem.nodeType === 1 ?
+		jQuery.find.matchesSelector( elem, expr ) ? [ elem ] : [] :
+		jQuery.find.matches( expr, jQuery.grep( elems, function( elem ) {
+			return elem.nodeType === 1;
+		} ) );
+};
+
+jQuery.fn.extend( {
+	find: function( selector ) {
+		var i, ret,
+			len = this.length,
+			self = this;
+
+		if ( typeof selector !== "string" ) {
+			return this.pushStack( jQuery( selector ).filter( function() {
+				for ( i = 0; i < len; i++ ) {
+					if ( jQuery.contains( self[ i ], this ) ) {
+						return true;
+					}
+				}
+			} ) );
+		}
+
+		ret = this.pushStack( [] );
+
+		for ( i = 0; i < len; i++ ) {
+			jQuery.find( selector, self[ i ], ret );
+		}
+
+		return len > 1 ? jQuery.uniqueSort( ret ) : ret;
+	},
+	filter: function( selector ) {
+		return this.pushStack( winnow( this, selector || [], false ) );
+	},
+	not: function( selector ) {
+		return this.pushStack( winnow( this, selector || [], true ) );
+	},
+	is: function( selector ) {
+		return !!winnow(
+			this,
+
+			// If this is a positional/relative selector, check membership in the returned set
+			// so $("p:first").is("p:last") won't return true for a doc with two "p".
+			typeof selector === "string" && rneedsContext.test( selector ) ?
+				jQuery( selector ) :
+				selector || [],
+			false
+		).length;
+	}
+} );
+
+
+// Initialize a jQuery object
+
+
+// A central reference to the root jQuery(document)
+var rootjQuery,
+
+	// A simple way to check for HTML strings
+	// Prioritize #id over <tag> to avoid XSS via location.hash (#9521)
+	// Strict HTML recognition (#11290: must start with <)
+	// Shortcut simple #id case for speed
+	rquickExpr = /^(?:\s*(<[\w\W]+>)[^>]*|#([\w-]+))$/,
+
+	init = jQuery.fn.init = function( selector, context, root ) {
+		var match, elem;
+
+		// HANDLE: $(""), $(null), $(undefined), $(false)
+		if ( !selector ) {
+			return this;
+		}
+
+		// Method init() accepts an alternate rootjQuery
+		// so migrate can support jQuery.sub (gh-2101)
+		root = root || rootjQuery;
+
+		// Handle HTML strings
+		if ( typeof selector === "string" ) {
+			if ( selector[ 0 ] === "<" &&
+				selector[ selector.length - 1 ] === ">" &&
+				selector.length >= 3 ) {
+
+				// Assume that strings that start and end with <> are HTML and skip the regex check
+				match = [ null, selector, null ];
+
+			} else {
+				match = rquickExpr.exec( selector );
+			}
+
+			// Match html or make sure no context is specified for #id
+			if ( match && ( match[ 1 ] || !context ) ) {
+
+				// HANDLE: $(html) -> $(array)
+				if ( match[ 1 ] ) {
+					context = context instanceof jQuery ? context[ 0 ] : context;
+
+					// Option to run scripts is true for back-compat
+					// Intentionally let the error be thrown if parseHTML is not present
+					jQuery.merge( this, jQuery.parseHTML(
+						match[ 1 ],
+						context && context.nodeType ? context.ownerDocument || context : document,
+						true
+					) );
+
+					// HANDLE: $(html, props)
+					if ( rsingleTag.test( match[ 1 ] ) && jQuery.isPlainObject( context ) ) {
+						for ( match in context ) {
+
+							// Properties of context are called as methods if possible
+							if ( jQuery.isFunction( this[ match ] ) ) {
+								this[ match ]( context[ match ] );
+
+							// ...and otherwise set as attributes
+							} else {
+								this.attr( match, context[ match ] );
+							}
+						}
+					}
+
+					return this;
+
+				// HANDLE: $(#id)
+				} else {
+					elem = document.getElementById( match[ 2 ] );
+
+					if ( elem ) {
+
+						// Inject the element directly into the jQuery object
+						this[ 0 ] = elem;
+						this.length = 1;
+					}
+					return this;
+				}
+
+			// HANDLE: $(expr, $(...))
+			} else if ( !context || context.jquery ) {
+				return ( context || root ).find( selector );
+
+			// HANDLE: $(expr, context)
+			// (which is just equivalent to: $(context).find(expr)
+			} else {
+				return this.constructor( context ).find( selector );
+			}
+
+		// HANDLE: $(DOMElement)
+		} else if ( selector.nodeType ) {
+			this[ 0 ] = selector;
+			this.length = 1;
+			return this;
+
+		// HANDLE: $(function)
+		// Shortcut for document ready
+		} else if ( jQuery.isFunction( selector ) ) {
+			return root.ready !== undefined ?
+				root.ready( selector ) :
+
+				// Execute immediately if ready is not present
+				selector( jQuery );
+		}
+
+		return jQuery.makeArray( selector, this );
+	};
+
+// Give the init function the jQuery prototype for later instantiation
+init.prototype = jQuery.fn;
+
+// Initialize central reference
+rootjQuery = jQuery( document );
+
+
+var rparentsprev = /^(?:parents|prev(?:Until|All))/,
+
+	// Methods guaranteed to produce a unique set when starting from a unique set
+	guaranteedUnique = {
+		children: true,
+		contents: true,
+		next: true,
+		prev: true
+	};
+
+jQuery.fn.extend( {
+	has: function( target ) {
+		var targets = jQuery( target, this ),
+			l = targets.length;
+
+		return this.filter( function() {
+			var i = 0;
+			for ( ; i < l; i++ ) {
+				if ( jQuery.contains( this, targets[ i ] ) ) {
+					return true;
+				}
+			}
+		} );
+	},
+
+	closest: function( selectors, context ) {
+		var cur,
+			i = 0,
+			l = this.length,
+			matched = [],
+			targets = typeof selectors !== "string" && jQuery( selectors );
+
+		// Positional selectors never match, since there's no _selection_ context
+		if ( !rneedsContext.test( selectors ) ) {
+			for ( ; i < l; i++ ) {
+				for ( cur = this[ i ]; cur && cur !== context; cur = cur.parentNode ) {
+
+					// Always skip document fragments
+					if ( cur.nodeType < 11 && ( targets ?
+						targets.index( cur ) > -1 :
+
+						// Don't pass non-elements to Sizzle
+						cur.nodeType === 1 &&
+							jQuery.find.matchesSelector( cur, selectors ) ) ) {
+
+						matched.push( cur );
+						break;
+					}
+				}
+			}
+		}
+
+		return this.pushStack( matched.length > 1 ? jQuery.uniqueSort( matched ) : matched );
+	},
+
+	// Determine the position of an element within the set
+	index: function( elem ) {
+
+		// No argument, return index in parent
+		if ( !elem ) {
+			return ( this[ 0 ] && this[ 0 ].parentNode ) ? this.first().prevAll().length : -1;
+		}
+
+		// Index in selector
+		if ( typeof elem === "string" ) {
+			return indexOf.call( jQuery( elem ), this[ 0 ] );
+		}
+
+		// Locate the position of the desired element
+		return indexOf.call( this,
+
+			// If it receives a jQuery object, the first element is used
+			elem.jquery ? elem[ 0 ] : elem
+		);
+	},
+
+	add: function( selector, context ) {
+		return this.pushStack(
+			jQuery.uniqueSort(
+				jQuery.merge( this.get(), jQuery( selector, context ) )
+			)
+		);
+	},
+
+	addBack: function( selector ) {
+		return this.add( selector == null ?
+			this.prevObject : this.prevObject.filter( selector )
+		);
+	}
+} );
+
+function sibling( cur, dir ) {
+	while ( ( cur = cur[ dir ] ) && cur.nodeType !== 1 ) {}
+	return cur;
+}
+
+jQuery.each( {
+	parent: function( elem ) {
+		var parent = elem.parentNode;
+		return parent && parent.nodeType !== 11 ? parent : null;
+	},
+	parents: function( elem ) {
+		return dir( elem, "parentNode" );
+	},
+	parentsUntil: function( elem, i, until ) {
+		return dir( elem, "parentNode", until );
+	},
+	next: function( elem ) {
+		return sibling( elem, "nextSibling" );
+	},
+	prev: function( elem ) {
+		return sibling( elem, "previousSibling" );
+	},
+	nextAll: function( elem ) {
+		return dir( elem, "nextSibling" );
+	},
+	prevAll: function( elem ) {
+		return dir( elem, "previousSibling" );
+	},
+	nextUntil: function( elem, i, until ) {
+		return dir( elem, "nextSibling", until );
+	},
+	prevUntil: function( elem, i, until ) {
+		return dir( elem, "previousSibling", until );
+	},
+	siblings: function( elem ) {
+		return siblings( ( elem.parentNode || {} ).firstChild, elem );
+	},
+	children: function( elem ) {
+		return siblings( elem.firstChild );
+	},
+	contents: function( elem ) {
+		return elem.contentDocument || jQuery.merge( [], elem.childNodes );
+	}
+}, function( name, fn ) {
+	jQuery.fn[ name ] = function( until, selector ) {
+		var matched = jQuery.map( this, fn, until );
+
+		if ( name.slice( -5 ) !== "Until" ) {
+			selector = until;
+		}
+
+		if ( selector && typeof selector === "string" ) {
+			matched = jQuery.filter( selector, matched );
+		}
+
+		if ( this.length > 1 ) {
+
+			// Remove duplicates
+			if ( !guaranteedUnique[ name ] ) {
+				jQuery.uniqueSort( matched );
+			}
+
+			// Reverse order for parents* and prev-derivatives
+			if ( rparentsprev.test( name ) ) {
+				matched.reverse();
+			}
+		}
+
+		return this.pushStack( matched );
+	};
+} );
+var rnotwhite = ( /\S+/g );
+
+
+
+// Convert String-formatted options into Object-formatted ones
+function createOptions( options ) {
+	var object = {};
+	jQuery.each( options.match( rnotwhite ) || [], function( _, flag ) {
+		object[ flag ] = true;
+	} );
+	return object;
+}
+
+/*
+ * Create a callback list using the following parameters:
+ *
+ *	options: an optional list of space-separated options that will change how
+ *			the callback list behaves or a more traditional option object
+ *
+ * By default a callback list will act like an event callback list and can be
+ * "fired" multiple times.
+ *
+ * Possible options:
+ *
+ *	once:			will ensure the callback list can only be fired once (like a Deferred)
+ *
+ *	memory:			will keep track of previous values and will call any callback added
+ *					after the list has been fired right away with the latest "memorized"
+ *					values (like a Deferred)
+ *
+ *	unique:			will ensure a callback can only be added once (no duplicate in the list)
+ *
+ *	stopOnFalse:	interrupt callings when a callback returns false
+ *
+ */
+jQuery.Callbacks = function( options ) {
+
+	// Convert options from String-formatted to Object-formatted if needed
+	// (we check in cache first)
+	options = typeof options === "string" ?
+		createOptions( options ) :
+		jQuery.extend( {}, options );
+
+	var // Flag to know if list is currently firing
+		firing,
+
+		// Last fire value for non-forgettable lists
+		memory,
+
+		// Flag to know if list was already fired
+		fired,
+
+		// Flag to prevent firing
+		locked,
+
+		// Actual callback list
+		list = [],
+
+		// Queue of execution data for repeatable lists
+		queue = [],
+
+		// Index of currently firing callback (modified by add/remove as needed)
+		firingIndex = -1,
+
+		// Fire callbacks
+		fire = function() {
+
+			// Enforce single-firing
+			locked = options.once;
+
+			// Execute callbacks for all pending executions,
+			// respecting firingIndex overrides and runtime changes
+			fired = firing = true;
+			for ( ; queue.length; firingIndex = -1 ) {
+				memory = queue.shift();
+				while ( ++firingIndex < list.length ) {
+
+					// Run callback and check for early termination
+					if ( list[ firingIndex ].apply( memory[ 0 ], memory[ 1 ] ) === false &&
+						options.stopOnFalse ) {
+
+						// Jump to end and forget the data so .add doesn't re-fire
+						firingIndex = list.length;
+						memory = false;
+					}
+				}
+			}
+
+			// Forget the data if we're done with it
+			if ( !options.memory ) {
+				memory = false;
+			}
+
+			firing = false;
+
+			// Clean up if we're done firing for good
+			if ( locked ) {
+
+				// Keep an empty list if we have data for future add calls
+				if ( memory ) {
+					list = [];
+
+				// Otherwise, this object is spent
+				} else {
+					list = "";
+				}
+			}
+		},
+
+		// Actual Callbacks object
+		self = {
+
+			// Add a callback or a collection of callbacks to the list
+			add: function() {
+				if ( list ) {
+
+					// If we have memory from a past run, we should fire after adding
+					if ( memory && !firing ) {
+						firingIndex = list.length - 1;
+						queue.push( memory );
+					}
+
+					( function add( args ) {
+						jQuery.each( args, function( _, arg ) {
+							if ( jQuery.isFunction( arg ) ) {
+								if ( !options.unique || !self.has( arg ) ) {
+									list.push( arg );
+								}
+							} else if ( arg && arg.length && jQuery.type( arg ) !== "string" ) {
+
+								// Inspect recursively
+								add( arg );
+							}
+						} );
+					} )( arguments );
+
+					if ( memory && !firing ) {
+						fire();
+					}
+				}
+				return this;
+			},
+
+			// Remove a callback from the list
+			remove: function() {
+				jQuery.each( arguments, function( _, arg ) {
+					var index;
+					while ( ( index = jQuery.inArray( arg, list, index ) ) > -1 ) {
+						list.splice( index, 1 );
+
+						// Handle firing indexes
+						if ( index <= firingIndex ) {
+							firingIndex--;
+						}
+					}
+				} );
+				return this;
+			},
+
+			// Check if a given callback is in the list.
+			// If no argument is given, return whether or not list has callbacks attached.
+			has: function( fn ) {
+				return fn ?
+					jQuery.inArray( fn, list ) > -1 :
+					list.length > 0;
+			},
+
+			// Remove all callbacks from the list
+			empty: function() {
+				if ( list ) {
+					list = [];
+				}
+				return this;
+			},
+
+			// Disable .fire and .add
+			// Abort any current/pending executions
+			// Clear all callbacks and values
+			disable: function() {
+				locked = queue = [];
+				list = memory = "";
+				return this;
+			},
+			disabled: function() {
+				return !list;
+			},
+
+			// Disable .fire
+			// Also disable .add unless we have memory (since it would have no effect)
+			// Abort any pending executions
+			lock: function() {
+				locked = queue = [];
+				if ( !memory && !firing ) {
+					list = memory = "";
+				}
+				return this;
+			},
+			locked: function() {
+				return !!locked;
+			},
+
+			// Call all callbacks with the given context and arguments
+			fireWith: function( context, args ) {
+				if ( !locked ) {
+					args = args || [];
+					args = [ context, args.slice ? args.slice() : args ];
+					queue.push( args );
+					if ( !firing ) {
+						fire();
+					}
+				}
+				return this;
+			},
+
+			// Call all the callbacks with the given arguments
+			fire: function() {
+				self.fireWith( this, arguments );
+				return this;
+			},
+
+			// To know if the callbacks have already been called at least once
+			fired: function() {
+				return !!fired;
+			}
+		};
+
+	return self;
+};
+
+
+function Identity( v ) {
+	return v;
+}
+function Thrower( ex ) {
+	throw ex;
+}
+
+function adoptValue( value, resolve, reject ) {
+	var method;
+
+	try {
+
+		// Check for promise aspect first to privilege synchronous behavior
+		if ( value && jQuery.isFunction( ( method = value.promise ) ) ) {
+			method.call( value ).done( resolve ).fail( reject );
+
+		// Other thenables
+		} else if ( value && jQuery.isFunction( ( method = value.then ) ) ) {
+			method.call( value, resolve, reject );
+
+		// Other non-thenables
+		} else {
+
+			// Support: Android 4.0 only
+			// Strict mode functions invoked without .call/.apply get global-object context
+			resolve.call( undefined, value );
+		}
+
+	// For Promises/A+, convert exceptions into rejections
+	// Since jQuery.when doesn't unwrap thenables, we can skip the extra checks appearing in
+	// Deferred#then to conditionally suppress rejection.
+	} catch ( value ) {
+
+		// Support: Android 4.0 only
+		// Strict mode functions invoked without .call/.apply get global-object context
+		reject.call( undefined, value );
+	}
+}
+
+jQuery.extend( {
+
+	Deferred: function( func ) {
+		var tuples = [
+
+				// action, add listener, callbacks,
+				// ... .then handlers, argument index, [final state]
+				[ "notify", "progress", jQuery.Callbacks( "memory" ),
+					jQuery.Callbacks( "memory" ), 2 ],
+				[ "resolve", "done", jQuery.Callbacks( "once memory" ),
+					jQuery.Callbacks( "once memory" ), 0, "resolved" ],
+				[ "reject", "fail", jQuery.Callbacks( "once memory" ),
+					jQuery.Callbacks( "once memory" ), 1, "rejected" ]
+			],
+			state = "pending",
+			promise = {
+				state: function() {
+					return state;
+				},
+				always: function() {
+					deferred.done( arguments ).fail( arguments );
+					return this;
+				},
+				"catch": function( fn ) {
+					return promise.then( null, fn );
+				},
+
+				// Keep pipe for back-compat
+				pipe: function( /* fnDone, fnFail, fnProgress */ ) {
+					var fns = arguments;
+
+					return jQuery.Deferred( function( newDefer ) {
+						jQuery.each( tuples, function( i, tuple ) {
+
+							// Map tuples (progress, done, fail) to arguments (done, fail, progress)
+							var fn = jQuery.isFunction( fns[ tuple[ 4 ] ] ) && fns[ tuple[ 4 ] ];
+
+							// deferred.progress(function() { bind to newDefer or newDefer.notify })
+							// deferred.done(function() { bind to newDefer or newDefer.resolve })
+							// deferred.fail(function() { bind to newDefer or newDefer.reject })
+							deferred[ tuple[ 1 ] ]( function() {
+								var returned = fn && fn.apply( this, arguments );
+								if ( returned && jQuery.isFunction( returned.promise ) ) {
+									returned.promise()
+										.progress( newDefer.notify )
+										.done( newDefer.resolve )
+										.fail( newDefer.reject );
+								} else {
+									newDefer[ tuple[ 0 ] + "With" ](
+										this,
+										fn ? [ returned ] : arguments
+									);
+								}
+							} );
+						} );
+						fns = null;
+					} ).promise();
+				},
+				then: function( onFulfilled, onRejected, onProgress ) {
+					var maxDepth = 0;
+					function resolve( depth, deferred, handler, special ) {
+						return function() {
+							var that = this,
+								args = arguments,
+								mightThrow = function() {
+									var returned, then;
+
+									// Support: Promises/A+ section 2.3.3.3.3
+									// https://promisesaplus.com/#point-59
+									// Ignore double-resolution attempts
+									if ( depth < maxDepth ) {
+										return;
+									}
+
+									returned = handler.apply( that, args );
+
+									// Support: Promises/A+ section 2.3.1
+									// https://promisesaplus.com/#point-48
+									if ( returned === deferred.promise() ) {
+										throw new TypeError( "Thenable self-resolution" );
+									}
+
+									// Support: Promises/A+ sections 2.3.3.1, 3.5
+									// https://promisesaplus.com/#point-54
+									// https://promisesaplus.com/#point-75
+									// Retrieve `then` only once
+									then = returned &&
+
+										// Support: Promises/A+ section 2.3.4
+										// https://promisesaplus.com/#point-64
+										// Only check objects and functions for thenability
+										( typeof returned === "object" ||
+											typeof returned === "function" ) &&
+										returned.then;
+
+									// Handle a returned thenable
+									if ( jQuery.isFunction( then ) ) {
+
+										// Special processors (notify) just wait for resolution
+										if ( special ) {
+											then.call(
+												returned,
+												resolve( maxDepth, deferred, Identity, special ),
+												resolve( maxDepth, deferred, Thrower, special )
+											);
+
+										// Normal processors (resolve) also hook into progress
+										} else {
+
+											// ...and disregard older resolution values
+											maxDepth++;
+
+											then.call(
+												returned,
+												resolve( maxDepth, deferred, Identity, special ),
+												resolve( maxDepth, deferred, Thrower, special ),
+												resolve( maxDepth, deferred, Identity,
+													deferred.notifyWith )
+											);
+										}
+
+									// Handle all other returned values
+									} else {
+
+										// Only substitute handlers pass on context
+										// and multiple values (non-spec behavior)
+										if ( handler !== Identity ) {
+											that = undefined;
+											args = [ returned ];
+										}
+
+										// Process the value(s)
+										// Default process is resolve
+										( special || deferred.resolveWith )( that, args );
+									}
+								},
+
+								// Only normal processors (resolve) catch and reject exceptions
+								process = special ?
+									mightThrow :
+									function() {
+										try {
+											mightThrow();
+										} catch ( e ) {
+
+											if ( jQuery.Deferred.exceptionHook ) {
+												jQuery.Deferred.exceptionHook( e,
+													process.stackTrace );
+											}
+
+											// Support: Promises/A+ section 2.3.3.3.4.1
+											// https://promisesaplus.com/#point-61
+											// Ignore post-resolution exceptions
+											if ( depth + 1 >= maxDepth ) {
+
+												// Only substitute handlers pass on context
+												// and multiple values (non-spec behavior)
+												if ( handler !== Thrower ) {
+													that = undefined;
+													args = [ e ];
+												}
+
+												deferred.rejectWith( that, args );
+											}
+										}
+									};
+
+							// Support: Promises/A+ section 2.3.3.3.1
+							// https://promisesaplus.com/#point-57
+							// Re-resolve promises immediately to dodge false rejection from
+							// subsequent errors
+							if ( depth ) {
+								process();
+							} else {
+
+								// Call an optional hook to record the stack, in case of exception
+								// since it's otherwise lost when execution goes async
+								if ( jQuery.Deferred.getStackHook ) {
+									process.stackTrace = jQuery.Deferred.getStackHook();
+								}
+								window.setTimeout( process );
+							}
+						};
+					}
+
+					return jQuery.Deferred( function( newDefer ) {
+
+						// progress_handlers.add( ... )
+						tuples[ 0 ][ 3 ].add(
+							resolve(
+								0,
+								newDefer,
+								jQuery.isFunction( onProgress ) ?
+									onProgress :
+									Identity,
+								newDefer.notifyWith
+							)
+						);
+
+						// fulfilled_handlers.add( ... )
+						tuples[ 1 ][ 3 ].add(
+							resolve(
+								0,
+								newDefer,
+								jQuery.isFunction( onFulfilled ) ?
+									onFulfilled :
+									Identity
+							)
+						);
+
+						// rejected_handlers.add( ... )
+						tuples[ 2 ][ 3 ].add(
+							resolve(
+								0,
+								newDefer,
+								jQuery.isFunction( onRejected ) ?
+									onRejected :
+									Thrower
+							)
+						);
+					} ).promise();
+				},
+
+				// Get a promise for this deferred
+				// If obj is provided, the promise aspect is added to the object
+				promise: function( obj ) {
+					return obj != null ? jQuery.extend( obj, promise ) : promise;
+				}
+			},
+			deferred = {};
+
+		// Add list-specific methods
+		jQuery.each( tuples, function( i, tuple ) {
+			var list = tuple[ 2 ],
+				stateString = tuple[ 5 ];
+
+			// promise.progress = list.add
+			// promise.done = list.add
+			// promise.fail = list.add
+			promise[ tuple[ 1 ] ] = list.add;
+
+			// Handle state
+			if ( stateString ) {
+				list.add(
+					function() {
+
+						// state = "resolved" (i.e., fulfilled)
+						// state = "rejected"
+						state = stateString;
+					},
+
+					// rejected_callbacks.disable
+					// fulfilled_callbacks.disable
+					tuples[ 3 - i ][ 2 ].disable,
+
+					// progress_callbacks.lock
+					tuples[ 0 ][ 2 ].lock
+				);
+			}
+
+			// progress_handlers.fire
+			// fulfilled_handlers.fire
+			// rejected_handlers.fire
+			list.add( tuple[ 3 ].fire );
+
+			// deferred.notify = function() { deferred.notifyWith(...) }
+			// deferred.resolve = function() { deferred.resolveWith(...) }
+			// deferred.reject = function() { deferred.rejectWith(...) }
+			deferred[ tuple[ 0 ] ] = function() {
+				deferred[ tuple[ 0 ] + "With" ]( this === deferred ? undefined : this, arguments );
+				return this;
+			};
+
+			// deferred.notifyWith = list.fireWith
+			// deferred.resolveWith = list.fireWith
+			// deferred.rejectWith = list.fireWith
+			deferred[ tuple[ 0 ] + "With" ] = list.fireWith;
+		} );
+
+		// Make the deferred a promise
+		promise.promise( deferred );
+
+		// Call given func if any
+		if ( func ) {
+			func.call( deferred, deferred );
+		}
+
+		// All done!
+		return deferred;
+	},
+
+	// Deferred helper
+	when: function( singleValue ) {
+		var
+
+			// count of uncompleted subordinates
+			remaining = arguments.length,
+
+			// count of unprocessed arguments
+			i = remaining,
+
+			// subordinate fulfillment data
+			resolveContexts = Array( i ),
+			resolveValues = slice.call( arguments ),
+
+			// the master Deferred
+			master = jQuery.Deferred(),
+
+			// subordinate callback factory
+			updateFunc = function( i ) {
+				return function( value ) {
+					resolveContexts[ i ] = this;
+					resolveValues[ i ] = arguments.length > 1 ? slice.call( arguments ) : value;
+					if ( !( --remaining ) ) {
+						master.resolveWith( resolveContexts, resolveValues );
+					}
+				};
+			};
+
+		// Single- and empty arguments are adopted like Promise.resolve
+		if ( remaining <= 1 ) {
+			adoptValue( singleValue, master.done( updateFunc( i ) ).resolve, master.reject );
+
+			// Use .then() to unwrap secondary thenables (cf. gh-3000)
+			if ( master.state() === "pending" ||
+				jQuery.isFunction( resolveValues[ i ] && resolveValues[ i ].then ) ) {
+
+				return master.then();
+			}
+		}
+
+		// Multiple arguments are aggregated like Promise.all array elements
+		while ( i-- ) {
+			adoptValue( resolveValues[ i ], updateFunc( i ), master.reject );
+		}
+
+		return master.promise();
+	}
+} );
+
+
+// These usually indicate a programmer mistake during development,
+// warn about them ASAP rather than swallowing them by default.
+var rerrorNames = /^(Eval|Internal|Range|Reference|Syntax|Type|URI)Error$/;
+
+jQuery.Deferred.exceptionHook = function( error, stack ) {
+
+	// Support: IE 8 - 9 only
+	// Console exists when dev tools are open, which can happen at any time
+	if ( window.console && window.console.warn && error && rerrorNames.test( error.name ) ) {
+		window.console.warn( "jQuery.Deferred exception: " + error.message, error.stack, stack );
+	}
+};
+
+
+
+
+jQuery.readyException = function( error ) {
+	window.setTimeout( function() {
+		throw error;
+	} );
+};
+
+
+
+
+// The deferred used on DOM ready
+var readyList = jQuery.Deferred();
+
+jQuery.fn.ready = function( fn ) {
+
+	readyList
+		.then( fn )
+
+		// Wrap jQuery.readyException in a function so that the lookup
+		// happens at the time of error handling instead of callback
+		// registration.
+		.catch( function( error ) {
+			jQuery.readyException( error );
+		} );
+
+	return this;
+};
+
+jQuery.extend( {
+
+	// Is the DOM ready to be used? Set to true once it occurs.
+	isReady: false,
+
+	// A counter to track how many items to wait for before
+	// the ready event fires. See #6781
+	readyWait: 1,
+
+	// Hold (or release) the ready event
+	holdReady: function( hold ) {
+		if ( hold ) {
+			jQuery.readyWait++;
+		} else {
+			jQuery.ready( true );
+		}
+	},
+
+	// Handle when the DOM is ready
+	ready: function( wait ) {
+
+		// Abort if there are pending holds or we're already ready
+		if ( wait === true ? --jQuery.readyWait : jQuery.isReady ) {
+			return;
+		}
+
+		// Remember that the DOM is ready
+		jQuery.isReady = true;
+
+		// If a normal DOM Ready event fired, decrement, and wait if need be
+		if ( wait !== true && --jQuery.readyWait > 0 ) {
+			return;
+		}
+
+		// If there are functions bound, to execute
+		readyList.resolveWith( document, [ jQuery ] );
+	}
+} );
+
+jQuery.ready.then = readyList.then;
+
+// The ready event handler and self cleanup method
+function completed() {
+	document.removeEventListener( "DOMContentLoaded", completed );
+	window.removeEventListener( "load", completed );
+	jQuery.ready();
+}
+
+// Catch cases where $(document).ready() is called
+// after the browser event has already occurred.
+// Support: IE <=9 - 10 only
+// Older IE sometimes signals "interactive" too soon
+if ( document.readyState === "complete" ||
+	( document.readyState !== "loading" && !document.documentElement.doScroll ) ) {
+
+	// Handle it asynchronously to allow scripts the opportunity to delay ready
+	window.setTimeout( jQuery.ready );
+
+} else {
+
+	// Use the handy event callback
+	document.addEventListener( "DOMContentLoaded", completed );
+
+	// A fallback to window.onload, that will always work
+	window.addEventListener( "load", completed );
+}
+
+
+
+
+// Multifunctional method to get and set values of a collection
+// The value/s can optionally be executed if it's a function
+var access = function( elems, fn, key, value, chainable, emptyGet, raw ) {
+	var i = 0,
+		len = elems.length,
+		bulk = key == null;
+
+	// Sets many values
+	if ( jQuery.type( key ) === "object" ) {
+		chainable = true;
+		for ( i in key ) {
+			access( elems, fn, i, key[ i ], true, emptyGet, raw );
+		}
+
+	// Sets one value
+	} else if ( value !== undefined ) {
+		chainable = true;
+
+		if ( !jQuery.isFunction( value ) ) {
+			raw = true;
+		}
+
+		if ( bulk ) {
+
+			// Bulk operations run against the entire set
+			if ( raw ) {
+				fn.call( elems, value );
+				fn = null;
+
+			// ...except when executing function values
+			} else {
+				bulk = fn;
+				fn = function( elem, key, value ) {
+					return bulk.call( jQuery( elem ), value );
+				};
+			}
+		}
+
+		if ( fn ) {
+			for ( ; i < len; i++ ) {
+				fn(
+					elems[ i ], key, raw ?
+					value :
+					value.call( elems[ i ], i, fn( elems[ i ], key ) )
+				);
+			}
+		}
+	}
+
+	return chainable ?
+		elems :
+
+		// Gets
+		bulk ?
+			fn.call( elems ) :
+			len ? fn( elems[ 0 ], key ) : emptyGet;
+};
+var acceptData = function( owner ) {
+
+	// Accepts only:
+	//  - Node
+	//    - Node.ELEMENT_NODE
+	//    - Node.DOCUMENT_NODE
+	//  - Object
+	//    - Any
+	return owner.nodeType === 1 || owner.nodeType === 9 || !( +owner.nodeType );
+};
+
+
+
+
+function Data() {
+	this.expando = jQuery.expando + Data.uid++;
+}
+
+Data.uid = 1;
+
+Data.prototype = {
+
+	cache: function( owner ) {
+
+		// Check if the owner object already has a cache
+		var value = owner[ this.expando ];
+
+		// If not, create one
+		if ( !value ) {
+			value = {};
+
+			// We can accept data for non-element nodes in modern browsers,
+			// but we should not, see #8335.
+			// Always return an empty object.
+			if ( acceptData( owner ) ) {
+
+				// If it is a node unlikely to be stringify-ed or looped over
+				// use plain assignment
+				if ( owner.nodeType ) {
+					owner[ this.expando ] = value;
+
+				// Otherwise secure it in a non-enumerable property
+				// configurable must be true to allow the property to be
+				// deleted when data is removed
+				} else {
+					Object.defineProperty( owner, this.expando, {
+						value: value,
+						configurable: true
+					} );
+				}
+			}
+		}
+
+		return value;
+	},
+	set: function( owner, data, value ) {
+		var prop,
+			cache = this.cache( owner );
+
+		// Handle: [ owner, key, value ] args
+		// Always use camelCase key (gh-2257)
+		if ( typeof data === "string" ) {
+			cache[ jQuery.camelCase( data ) ] = value;
+
+		// Handle: [ owner, { properties } ] args
+		} else {
+
+			// Copy the properties one-by-one to the cache object
+			for ( prop in data ) {
+				cache[ jQuery.camelCase( prop ) ] = data[ prop ];
+			}
+		}
+		return cache;
+	},
+	get: function( owner, key ) {
+		return key === undefined ?
+			this.cache( owner ) :
+
+			// Always use camelCase key (gh-2257)
+			owner[ this.expando ] && owner[ this.expando ][ jQuery.camelCase( key ) ];
+	},
+	access: function( owner, key, value ) {
+
+		// In cases where either:
+		//
+		//   1. No key was specified
+		//   2. A string key was specified, but no value provided
+		//
+		// Take the "read" path and allow the get method to determine
+		// which value to return, respectively either:
+		//
+		//   1. The entire cache object
+		//   2. The data stored at the key
+		//
+		if ( key === undefined ||
+				( ( key && typeof key === "string" ) && value === undefined ) ) {
+
+			return this.get( owner, key );
+		}
+
+		// When the key is not a string, or both a key and value
+		// are specified, set or extend (existing objects) with either:
+		//
+		//   1. An object of properties
+		//   2. A key and value
+		//
+		this.set( owner, key, value );
+
+		// Since the "set" path can have two possible entry points
+		// return the expected data based on which path was taken[*]
+		return value !== undefined ? value : key;
+	},
+	remove: function( owner, key ) {
+		var i,
+			cache = owner[ this.expando ];
+
+		if ( cache === undefined ) {
+			return;
+		}
+
+		if ( key !== undefined ) {
+
+			// Support array or space separated string of keys
+			if ( jQuery.isArray( key ) ) {
+
+				// If key is an array of keys...
+				// We always set camelCase keys, so remove that.
+				key = key.map( jQuery.camelCase );
+			} else {
+				key = jQuery.camelCase( key );
+
+				// If a key with the spaces exists, use it.
+				// Otherwise, create an array by matching non-whitespace
+				key = key in cache ?
+					[ key ] :
+					( key.match( rnotwhite ) || [] );
+			}
+
+			i = key.length;
+
+			while ( i-- ) {
+				delete cache[ key[ i ] ];
+			}
+		}
+
+		// Remove the expando if there's no more data
+		if ( key === undefined || jQuery.isEmptyObject( cache ) ) {
+
+			// Support: Chrome <=35 - 45
+			// Webkit & Blink performance suffers when deleting properties
+			// from DOM nodes, so set to undefined instead
+			// https://bugs.chromium.org/p/chromium/issues/detail?id=378607 (bug restricted)
+			if ( owner.nodeType ) {
+				owner[ this.expando ] = undefined;
+			} else {
+				delete owner[ this.expando ];
+			}
+		}
+	},
+	hasData: function( owner ) {
+		var cache = owner[ this.expando ];
+		return cache !== undefined && !jQuery.isEmptyObject( cache );
+	}
+};
+var dataPriv = new Data();
+
+var dataUser = new Data();
+
+
+
+//	Implementation Summary
+//
+//	1. Enforce API surface and semantic compatibility with 1.9.x branch
+//	2. Improve the module's maintainability by reducing the storage
+//		paths to a single mechanism.
+//	3. Use the same single mechanism to support "private" and "user" data.
+//	4. _Never_ expose "private" data to user code (TODO: Drop _data, _removeData)
+//	5. Avoid exposing implementation details on user objects (eg. expando properties)
+//	6. Provide a clear path for implementation upgrade to WeakMap in 2014
+
+var rbrace = /^(?:\{[\w\W]*\}|\[[\w\W]*\])$/,
+	rmultiDash = /[A-Z]/g;
+
+function dataAttr( elem, key, data ) {
+	var name;
+
+	// If nothing was found internally, try to fetch any
+	// data from the HTML5 data-* attribute
+	if ( data === undefined && elem.nodeType === 1 ) {
+		name = "data-" + key.replace( rmultiDash, "-$&" ).toLowerCase();
+		data = elem.getAttribute( name );
+
+		if ( typeof data === "string" ) {
+			try {
+				data = data === "true" ? true :
+					data === "false" ? false :
+					data === "null" ? null :
+
+					// Only convert to a number if it doesn't change the string
+					+data + "" === data ? +data :
+					rbrace.test( data ) ? JSON.parse( data ) :
+					data;
+			} catch ( e ) {}
+
+			// Make sure we set the data so it isn't changed later
+			dataUser.set( elem, key, data );
+		} else {
+			data = undefined;
+		}
+	}
+	return data;
+}
+
+jQuery.extend( {
+	hasData: function( elem ) {
+		return dataUser.hasData( elem ) || dataPriv.hasData( elem );
+	},
+
+	data: function( elem, name, data ) {
+		return dataUser.access( elem, name, data );
+	},
+
+	removeData: function( elem, name ) {
+		dataUser.remove( elem, name );
+	},
+
+	// TODO: Now that all calls to _data and _removeData have been replaced
+	// with direct calls to dataPriv methods, these can be deprecated.
+	_data: function( elem, name, data ) {
+		return dataPriv.access( elem, name, data );
+	},
+
+	_removeData: function( elem, name ) {
+		dataPriv.remove( elem, name );
+	}
+} );
+
+jQuery.fn.extend( {
+	data: function( key, value ) {
+		var i, name, data,
+			elem = this[ 0 ],
+			attrs = elem && elem.attributes;
+
+		// Gets all values
+		if ( key === undefined ) {
+			if ( this.length ) {
+				data = dataUser.get( elem );
+
+				if ( elem.nodeType === 1 && !dataPriv.get( elem, "hasDataAttrs" ) ) {
+					i = attrs.length;
+					while ( i-- ) {
+
+						// Support: IE 11 only
+						// The attrs elements can be null (#14894)
+						if ( attrs[ i ] ) {
+							name = attrs[ i ].name;
+							if ( name.indexOf( "data-" ) === 0 ) {
+								name = jQuery.camelCase( name.slice( 5 ) );
+								dataAttr( elem, name, data[ name ] );
+							}
+						}
+					}
+					dataPriv.set( elem, "hasDataAttrs", true );
+				}
+			}
+
+			return data;
+		}
+
+		// Sets multiple values
+		if ( typeof key === "object" ) {
+			return this.each( function() {
+				dataUser.set( this, key );
+			} );
+		}
+
+		return access( this, function( value ) {
+			var data;
+
+			// The calling jQuery object (element matches) is not empty
+			// (and therefore has an element appears at this[ 0 ]) and the
+			// `value` parameter was not undefined. An empty jQuery object
+			// will result in `undefined` for elem = this[ 0 ] which will
+			// throw an exception if an attempt to read a data cache is made.
+			if ( elem && value === undefined ) {
+
+				// Attempt to get data from the cache
+				// The key will always be camelCased in Data
+				data = dataUser.get( elem, key );
+				if ( data !== undefined ) {
+					return data;
+				}
+
+				// Attempt to "discover" the data in
+				// HTML5 custom data-* attrs
+				data = dataAttr( elem, key );
+				if ( data !== undefined ) {
+					return data;
+				}
+
+				// We tried really hard, but the data doesn't exist.
+				return;
+			}
+
+			// Set the data...
+			this.each( function() {
+
+				// We always store the camelCased key
+				dataUser.set( this, key, value );
+			} );
+		}, null, value, arguments.length > 1, null, true );
+	},
+
+	removeData: function( key ) {
+		return this.each( function() {
+			dataUser.remove( this, key );
+		} );
+	}
+} );
+
+
+jQuery.extend( {
+	queue: function( elem, type, data ) {
+		var queue;
+
+		if ( elem ) {
+			type = ( type || "fx" ) + "queue";
+			queue = dataPriv.get( elem, type );
+
+			// Speed up dequeue by getting out quickly if this is just a lookup
+			if ( data ) {
+				if ( !queue || jQuery.isArray( data ) ) {
+					queue = dataPriv.access( elem, type, jQuery.makeArray( data ) );
+				} else {
+					queue.push( data );
+				}
+			}
+			return queue || [];
+		}
+	},
+
+	dequeue: function( elem, type ) {
+		type = type || "fx";
+
+		var queue = jQuery.queue( elem, type ),
+			startLength = queue.length,
+			fn = queue.shift(),
+			hooks = jQuery._queueHooks( elem, type ),
+			next = function() {
+				jQuery.dequeue( elem, type );
+			};
+
+		// If the fx queue is dequeued, always remove the progress sentinel
+		if ( fn === "inprogress" ) {
+			fn = queue.shift();
+			startLength--;
+		}
+
+		if ( fn ) {
+
+			// Add a progress sentinel to prevent the fx queue from being
+			// automatically dequeued
+			if ( type === "fx" ) {
+				queue.unshift( "inprogress" );
+			}
+
+			// Clear up the last queue stop function
+			delete hooks.stop;
+			fn.call( elem, next, hooks );
+		}
+
+		if ( !startLength && hooks ) {
+			hooks.empty.fire();
+		}
+	},
+
+	// Not public - generate a queueHooks object, or return the current one
+	_queueHooks: function( elem, type ) {
+		var key = type + "queueHooks";
+		return dataPriv.get( elem, key ) || dataPriv.access( elem, key, {
+			empty: jQuery.Callbacks( "once memory" ).add( function() {
+				dataPriv.remove( elem, [ type + "queue", key ] );
+			} )
+		} );
+	}
+} );
+
+jQuery.fn.extend( {
+	queue: function( type, data ) {
+		var setter = 2;
+
+		if ( typeof type !== "string" ) {
+			data = type;
+			type = "fx";
+			setter--;
+		}
+
+		if ( arguments.length < setter ) {
+			return jQuery.queue( this[ 0 ], type );
+		}
+
+		return data === undefined ?
+			this :
+			this.each( function() {
+				var queue = jQuery.queue( this, type, data );
+
+				// Ensure a hooks for this queue
+				jQuery._queueHooks( this, type );
+
+				if ( type === "fx" && queue[ 0 ] !== "inprogress" ) {
+					jQuery.dequeue( this, type );
+				}
+			} );
+	},
+	dequeue: function( type ) {
+		return this.each( function() {
+			jQuery.dequeue( this, type );
+		} );
+	},
+	clearQueue: function( type ) {
+		return this.queue( type || "fx", [] );
+	},
+
+	// Get a promise resolved when queues of a certain type
+	// are emptied (fx is the type by default)
+	promise: function( type, obj ) {
+		var tmp,
+			count = 1,
+			defer = jQuery.Deferred(),
+			elements = this,
+			i = this.length,
+			resolve = function() {
+				if ( !( --count ) ) {
+					defer.resolveWith( elements, [ elements ] );
+				}
+			};
+
+		if ( typeof type !== "string" ) {
+			obj = type;
+			type = undefined;
+		}
+		type = type || "fx";
+
+		while ( i-- ) {
+			tmp = dataPriv.get( elements[ i ], type + "queueHooks" );
+			if ( tmp && tmp.empty ) {
+				count++;
+				tmp.empty.add( resolve );
+			}
+		}
+		resolve();
+		return defer.promise( obj );
+	}
+} );
+var pnum = ( /[+-]?(?:\d*\.|)\d+(?:[eE][+-]?\d+|)/ ).source;
+
+var rcssNum = new RegExp( "^(?:([+-])=|)(" + pnum + ")([a-z%]*)$", "i" );
+
+
+var cssExpand = [ "Top", "Right", "Bottom", "Left" ];
+
+var isHiddenWithinTree = function( elem, el ) {
+
+		// isHiddenWithinTree might be called from jQuery#filter function;
+		// in that case, element will be second argument
+		elem = el || elem;
+
+		// Inline style trumps all
+		return elem.style.display === "none" ||
+			elem.style.display === "" &&
+
+			// Otherwise, check computed style
+			// Support: Firefox <=43 - 45
+			// Disconnected elements can have computed display: none, so first confirm that elem is
+			// in the document.
+			jQuery.contains( elem.ownerDocument, elem ) &&
+
+			jQuery.css( elem, "display" ) === "none";
+	};
+
+var swap = function( elem, options, callback, args ) {
+	var ret, name,
+		old = {};
+
+	// Remember the old values, and insert the new ones
+	for ( name in options ) {
+		old[ name ] = elem.style[ name ];
+		elem.style[ name ] = options[ name ];
+	}
+
+	ret = callback.apply( elem, args || [] );
+
+	// Revert the old values
+	for ( name in options ) {
+		elem.style[ name ] = old[ name ];
+	}
+
+	return ret;
+};
+
+
+
+
+function adjustCSS( elem, prop, valueParts, tween ) {
+	var adjusted,
+		scale = 1,
+		maxIterations = 20,
+		currentValue = tween ?
+			function() {
+				return tween.cur();
+			} :
+			function() {
+				return jQuery.css( elem, prop, "" );
+			},
+		initial = currentValue(),
+		unit = valueParts && valueParts[ 3 ] || ( jQuery.cssNumber[ prop ] ? "" : "px" ),
+
+		// Starting value computation is required for potential unit mismatches
+		initialInUnit = ( jQuery.cssNumber[ prop ] || unit !== "px" && +initial ) &&
+			rcssNum.exec( jQuery.css( elem, prop ) );
+
+	if ( initialInUnit && initialInUnit[ 3 ] !== unit ) {
+
+		// Trust units reported by jQuery.css
+		unit = unit || initialInUnit[ 3 ];
+
+		// Make sure we update the tween properties later on
+		valueParts = valueParts || [];
+
+		// Iteratively approximate from a nonzero starting point
+		initialInUnit = +initial || 1;
+
+		do {
+
+			// If previous iteration zeroed out, double until we get *something*.
+			// Use string for doubling so we don't accidentally see scale as unchanged below
+			scale = scale || ".5";
+
+			// Adjust and apply
+			initialInUnit = initialInUnit / scale;
+			jQuery.style( elem, prop, initialInUnit + unit );
+
+		// Update scale, tolerating zero or NaN from tween.cur()
+		// Break the loop if scale is unchanged or perfect, or if we've just had enough.
+		} while (
+			scale !== ( scale = currentValue() / initial ) && scale !== 1 && --maxIterations
+		);
+	}
+
+	if ( valueParts ) {
+		initialInUnit = +initialInUnit || +initial || 0;
+
+		// Apply relative offset (+=/-=) if specified
+		adjusted = valueParts[ 1 ] ?
+			initialInUnit + ( valueParts[ 1 ] + 1 ) * valueParts[ 2 ] :
+			+valueParts[ 2 ];
+		if ( tween ) {
+			tween.unit = unit;
+			tween.start = initialInUnit;
+			tween.end = adjusted;
+		}
+	}
+	return adjusted;
+}
+
+
+var defaultDisplayMap = {};
+
+function getDefaultDisplay( elem ) {
+	var temp,
+		doc = elem.ownerDocument,
+		nodeName = elem.nodeName,
+		display = defaultDisplayMap[ nodeName ];
+
+	if ( display ) {
+		return display;
+	}
+
+	temp = doc.body.appendChild( doc.createElement( nodeName ) ),
+	display = jQuery.css( temp, "display" );
+
+	temp.parentNode.removeChild( temp );
+
+	if ( display === "none" ) {
+		display = "block";
+	}
+	defaultDisplayMap[ nodeName ] = display;
+
+	return display;
+}
+
+function showHide( elements, show ) {
+	var display, elem,
+		values = [],
+		index = 0,
+		length = elements.length;
+
+	// Determine new display value for elements that need to change
+	for ( ; index < length; index++ ) {
+		elem = elements[ index ];
+		if ( !elem.style ) {
+			continue;
+		}
+
+		display = elem.style.display;
+		if ( show ) {
+
+			// Since we force visibility upon cascade-hidden elements, an immediate (and slow)
+			// check is required in this first loop unless we have a nonempty display value (either
+			// inline or about-to-be-restored)
+			if ( display === "none" ) {
+				values[ index ] = dataPriv.get( elem, "display" ) || null;
+				if ( !values[ index ] ) {
+					elem.style.display = "";
+				}
+			}
+			if ( elem.style.display === "" && isHiddenWithinTree( elem ) ) {
+				values[ index ] = getDefaultDisplay( elem );
+			}
+		} else {
+			if ( display !== "none" ) {
+				values[ index ] = "none";
+
+				// Remember what we're overwriting
+				dataPriv.set( elem, "display", display );
+			}
+		}
+	}
+
+	// Set the display of the elements in a second loop to avoid constant reflow
+	for ( index = 0; index < length; index++ ) {
+		if ( values[ index ] != null ) {
+			elements[ index ].style.display = values[ index ];
+		}
+	}
+
+	return elements;
+}
+
+jQuery.fn.extend( {
+	show: function() {
+		return showHide( this, true );
+	},
+	hide: function() {
+		return showHide( this );
+	},
+	toggle: function( state ) {
+		if ( typeof state === "boolean" ) {
+			return state ? this.show() : this.hide();
+		}
+
+		return this.each( function() {
+			if ( isHiddenWithinTree( this ) ) {
+				jQuery( this ).show();
+			} else {
+				jQuery( this ).hide();
+			}
+		} );
+	}
+} );
+var rcheckableType = ( /^(?:checkbox|radio)$/i );
+
+var rtagName = ( /<([a-z][^\/\0>\x20\t\r\n\f]+)/i );
+
+var rscriptType = ( /^$|\/(?:java|ecma)script/i );
+
+
+
+// We have to close these tags to support XHTML (#13200)
+var wrapMap = {
+
+	// Support: IE <=9 only
+	option: [ 1, "<select multiple='multiple'>", "</select>" ],
+
+	// XHTML parsers do not magically insert elements in the
+	// same way that tag soup parsers do. So we cannot shorten
+	// this by omitting <tbody> or other required elements.
+	thead: [ 1, "<table>", "</table>" ],
+	col: [ 2, "<table><colgroup>", "</colgroup></table>" ],
+	tr: [ 2, "<table><tbody>", "</tbody></table>" ],
+	td: [ 3, "<table><tbody><tr>", "</tr></tbody></table>" ],
+
+	_default: [ 0, "", "" ]
+};
+
+// Support: IE <=9 only
+wrapMap.optgroup = wrapMap.option;
+
+wrapMap.tbody = wrapMap.tfoot = wrapMap.colgroup = wrapMap.caption = wrapMap.thead;
+wrapMap.th = wrapMap.td;
+
+
+function getAll( context, tag ) {
+
+	// Support: IE <=9 - 11 only
+	// Use typeof to avoid zero-argument method invocation on host objects (#15151)
+	var ret = typeof context.getElementsByTagName !== "undefined" ?
+			context.getElementsByTagName( tag || "*" ) :
+			typeof context.querySelectorAll !== "undefined" ?
+				context.querySelectorAll( tag || "*" ) :
+			[];
+
+	return tag === undefined || tag && jQuery.nodeName( context, tag ) ?
+		jQuery.merge( [ context ], ret ) :
+		ret;
+}
+
+
+// Mark scripts as having already been evaluated
+function setGlobalEval( elems, refElements ) {
+	var i = 0,
+		l = elems.length;
+
+	for ( ; i < l; i++ ) {
+		dataPriv.set(
+			elems[ i ],
+			"globalEval",
+			!refElements || dataPriv.get( refElements[ i ], "globalEval" )
+		);
+	}
+}
+
+
+var rhtml = /<|&#?\w+;/;
+
+function buildFragment( elems, context, scripts, selection, ignored ) {
+	var elem, tmp, tag, wrap, contains, j,
+		fragment = context.createDocumentFragment(),
+		nodes = [],
+		i = 0,
+		l = elems.length;
+
+	for ( ; i < l; i++ ) {
+		elem = elems[ i ];
+
+		if ( elem || elem === 0 ) {
+
+			// Add nodes directly
+			if ( jQuery.type( elem ) === "object" ) {
+
+				// Support: Android <=4.0 only, PhantomJS 1 only
+				// push.apply(_, arraylike) throws on ancient WebKit
+				jQuery.merge( nodes, elem.nodeType ? [ elem ] : elem );
+
+			// Convert non-html into a text node
+			} else if ( !rhtml.test( elem ) ) {
+				nodes.push( context.createTextNode( elem ) );
+
+			// Convert html into DOM nodes
+			} else {
+				tmp = tmp || fragment.appendChild( context.createElement( "div" ) );
+
+				// Deserialize a standard representation
+				tag = ( rtagName.exec( elem ) || [ "", "" ] )[ 1 ].toLowerCase();
+				wrap = wrapMap[ tag ] || wrapMap._default;
+				tmp.innerHTML = wrap[ 1 ] + jQuery.htmlPrefilter( elem ) + wrap[ 2 ];
+
+				// Descend through wrappers to the right content
+				j = wrap[ 0 ];
+				while ( j-- ) {
+					tmp = tmp.lastChild;
+				}
+
+				// Support: Android <=4.0 only, PhantomJS 1 only
+				// push.apply(_, arraylike) throws on ancient WebKit
+				jQuery.merge( nodes, tmp.childNodes );
+
+				// Remember the top-level container
+				tmp = fragment.firstChild;
+
+				// Ensure the created nodes are orphaned (#12392)
+				tmp.textContent = "";
+			}
+		}
+	}
+
+	// Remove wrapper from fragment
+	fragment.textContent = "";
+
+	i = 0;
+	while ( ( elem = nodes[ i++ ] ) ) {
+
+		// Skip elements already in the context collection (trac-4087)
+		if ( selection && jQuery.inArray( elem, selection ) > -1 ) {
+			if ( ignored ) {
+				ignored.push( elem );
+			}
+			continue;
+		}
+
+		contains = jQuery.contains( elem.ownerDocument, elem );
+
+		// Append to fragment
+		tmp = getAll( fragment.appendChild( elem ), "script" );
+
+		// Preserve script evaluation history
+		if ( contains ) {
+			setGlobalEval( tmp );
+		}
+
+		// Capture executables
+		if ( scripts ) {
+			j = 0;
+			while ( ( elem = tmp[ j++ ] ) ) {
+				if ( rscriptType.test( elem.type || "" ) ) {
+					scripts.push( elem );
+				}
+			}
+		}
+	}
+
+	return fragment;
+}
+
+
+( function() {
+	var fragment = document.createDocumentFragment(),
+		div = fragment.appendChild( document.createElement( "div" ) ),
+		input = document.createElement( "input" );
+
+	// Support: Android 4.0 - 4.3 only
+	// Check state lost if the name is set (#11217)
+	// Support: Windows Web Apps (WWA)
+	// `name` and `type` must use .setAttribute for WWA (#14901)
+	input.setAttribute( "type", "radio" );
+	input.setAttribute( "checked", "checked" );
+	input.setAttribute( "name", "t" );
+
+	div.appendChild( input );
+
+	// Support: Android <=4.1 only
+	// Older WebKit doesn't clone checked state correctly in fragments
+	support.checkClone = div.cloneNode( true ).cloneNode( true ).lastChild.checked;
+
+	// Support: IE <=11 only
+	// Make sure textarea (and checkbox) defaultValue is properly cloned
+	div.innerHTML = "<textarea>x</textarea>";
+	support.noCloneChecked = !!div.cloneNode( true ).lastChild.defaultValue;
+} )();
+var documentElement = document.documentElement;
+
+
+
+var
+	rkeyEvent = /^key/,
+	rmouseEvent = /^(?:mouse|pointer|contextmenu|drag|drop)|click/,
+	rtypenamespace = /^([^.]*)(?:\.(.+)|)/;
+
+function returnTrue() {
+	return true;
+}
+
+function returnFalse() {
+	return false;
+}
+
+// Support: IE <=9 only
+// See #13393 for more info
+function safeActiveElement() {
+	try {
+		return document.activeElement;
+	} catch ( err ) { }
+}
+
+function on( elem, types, selector, data, fn, one ) {
+	var origFn, type;
+
+	// Types can be a map of types/handlers
+	if ( typeof types === "object" ) {
+
+		// ( types-Object, selector, data )
+		if ( typeof selector !== "string" ) {
+
+			// ( types-Object, data )
+			data = data || selector;
+			selector = undefined;
+		}
+		for ( type in types ) {
+			on( elem, type, selector, data, types[ type ], one );
+		}
+		return elem;
+	}
+
+	if ( data == null && fn == null ) {
+
+		// ( types, fn )
+		fn = selector;
+		data = selector = undefined;
+	} else if ( fn == null ) {
+		if ( typeof selector === "string" ) {
+
+			// ( types, selector, fn )
+			fn = data;
+			data = undefined;
+		} else {
+
+			// ( types, data, fn )
+			fn = data;
+			data = selector;
+			selector = undefined;
+		}
+	}
+	if ( fn === false ) {
+		fn = returnFalse;
+	} else if ( !fn ) {
+		return elem;
+	}
+
+	if ( one === 1 ) {
+		origFn = fn;
+		fn = function( event ) {
+
+			// Can use an empty set, since event contains the info
+			jQuery().off( event );
+			return origFn.apply( this, arguments );
+		};
+
+		// Use same guid so caller can remove using origFn
+		fn.guid = origFn.guid || ( origFn.guid = jQuery.guid++ );
+	}
+	return elem.each( function() {
+		jQuery.event.add( this, types, fn, data, selector );
+	} );
+}
+
+/*
+ * Helper functions for managing events -- not part of the public interface.
+ * Props to Dean Edwards' addEvent library for many of the ideas.
+ */
+jQuery.event = {
+
+	global: {},
+
+	add: function( elem, types, handler, data, selector ) {
+
+		var handleObjIn, eventHandle, tmp,
+			events, t, handleObj,
+			special, handlers, type, namespaces, origType,
+			elemData = dataPriv.get( elem );
+
+		// Don't attach events to noData or text/comment nodes (but allow plain objects)
+		if ( !elemData ) {
+			return;
+		}
+
+		// Caller can pass in an object of custom data in lieu of the handler
+		if ( handler.handler ) {
+			handleObjIn = handler;
+			handler = handleObjIn.handler;
+			selector = handleObjIn.selector;
+		}
+
+		// Ensure that invalid selectors throw exceptions at attach time
+		// Evaluate against documentElement in case elem is a non-element node (e.g., document)
+		if ( selector ) {
+			jQuery.find.matchesSelector( documentElement, selector );
+		}
+
+		// Make sure that the handler has a unique ID, used to find/remove it later
+		if ( !handler.guid ) {
+			handler.guid = jQuery.guid++;
+		}
+
+		// Init the element's event structure and main handler, if this is the first
+		if ( !( events = elemData.events ) ) {
+			events = elemData.events = {};
+		}
+		if ( !( eventHandle = elemData.handle ) ) {
+			eventHandle = elemData.handle = function( e ) {
+
+				// Discard the second event of a jQuery.event.trigger() and
+				// when an event is called after a page has unloaded
+				return typeof jQuery !== "undefined" && jQuery.event.triggered !== e.type ?
+					jQuery.event.dispatch.apply( elem, arguments ) : undefined;
+			};
+		}
+
+		// Handle multiple events separated by a space
+		types = ( types || "" ).match( rnotwhite ) || [ "" ];
+		t = types.length;
+		while ( t-- ) {
+			tmp = rtypenamespace.exec( types[ t ] ) || [];
+			type = origType = tmp[ 1 ];
+			namespaces = ( tmp[ 2 ] || "" ).split( "." ).sort();
+
+			// There *must* be a type, no attaching namespace-only handlers
+			if ( !type ) {
+				continue;
+			}
+
+			// If event changes its type, use the special event handlers for the changed type
+			special = jQuery.event.special[ type ] || {};
+
+			// If selector defined, determine special event api type, otherwise given type
+			type = ( selector ? special.delegateType : special.bindType ) || type;
+
+			// Update special based on newly reset type
+			special = jQuery.event.special[ type ] || {};
+
+			// handleObj is passed to all event handlers
+			handleObj = jQuery.extend( {
+				type: type,
+				origType: origType,
+				data: data,
+				handler: handler,
+				guid: handler.guid,
+				selector: selector,
+				needsContext: selector && jQuery.expr.match.needsContext.test( selector ),
+				namespace: namespaces.join( "." )
+			}, handleObjIn );
+
+			// Init the event handler queue if we're the first
+			if ( !( handlers = events[ type ] ) ) {
+				handlers = events[ type ] = [];
+				handlers.delegateCount = 0;
+
+				// Only use addEventListener if the special events handler returns false
+				if ( !special.setup ||
+					special.setup.call( elem, data, namespaces, eventHandle ) === false ) {
+
+					if ( elem.addEventListener ) {
+						elem.addEventListener( type, eventHandle );
+					}
+				}
+			}
+
+			if ( special.add ) {
+				special.add.call( elem, handleObj );
+
+				if ( !handleObj.handler.guid ) {
+					handleObj.handler.guid = handler.guid;
+				}
+			}
+
+			// Add to the element's handler list, delegates in front
+			if ( selector ) {
+				handlers.splice( handlers.delegateCount++, 0, handleObj );
+			} else {
+				handlers.push( handleObj );
+			}
+
+			// Keep track of which events have ever been used, for event optimization
+			jQuery.event.global[ type ] = true;
+		}
+
+	},
+
+	// Detach an event or set of events from an element
+	remove: function( elem, types, handler, selector, mappedTypes ) {
+
+		var j, origCount, tmp,
+			events, t, handleObj,
+			special, handlers, type, namespaces, origType,
+			elemData = dataPriv.hasData( elem ) && dataPriv.get( elem );
+
+		if ( !elemData || !( events = elemData.events ) ) {
+			return;
+		}
+
+		// Once for each type.namespace in types; type may be omitted
+		types = ( types || "" ).match( rnotwhite ) || [ "" ];
+		t = types.length;
+		while ( t-- ) {
+			tmp = rtypenamespace.exec( types[ t ] ) || [];
+			type = origType = tmp[ 1 ];
+			namespaces = ( tmp[ 2 ] || "" ).split( "." ).sort();
+
+			// Unbind all events (on this namespace, if provided) for the element
+			if ( !type ) {
+				for ( type in events ) {
+					jQuery.event.remove( elem, type + types[ t ], handler, selector, true );
+				}
+				continue;
+			}
+
+			special = jQuery.event.special[ type ] || {};
+			type = ( selector ? special.delegateType : special.bindType ) || type;
+			handlers = events[ type ] || [];
+			tmp = tmp[ 2 ] &&
+				new RegExp( "(^|\\.)" + namespaces.join( "\\.(?:.*\\.|)" ) + "(\\.|$)" );
+
+			// Remove matching events
+			origCount = j = handlers.length;
+			while ( j-- ) {
+				handleObj = handlers[ j ];
+
+				if ( ( mappedTypes || origType === handleObj.origType ) &&
+					( !handler || handler.guid === handleObj.guid ) &&
+					( !tmp || tmp.test( handleObj.namespace ) ) &&
+					( !selector || selector === handleObj.selector ||
+						selector === "**" && handleObj.selector ) ) {
+					handlers.splice( j, 1 );
+
+					if ( handleObj.selector ) {
+						handlers.delegateCount--;
+					}
+					if ( special.remove ) {
+						special.remove.call( elem, handleObj );
+					}
+				}
+			}
+
+			// Remove generic event handler if we removed something and no more handlers exist
+			// (avoids potential for endless recursion during removal of special event handlers)
+			if ( origCount && !handlers.length ) {
+				if ( !special.teardown ||
+					special.teardown.call( elem, namespaces, elemData.handle ) === false ) {
+
+					jQuery.removeEvent( elem, type, elemData.handle );
+				}
+
+				delete events[ type ];
+			}
+		}
+
+		// Remove data and the expando if it's no longer used
+		if ( jQuery.isEmptyObject( events ) ) {
+			dataPriv.remove( elem, "handle events" );
+		}
+	},
+
+	dispatch: function( nativeEvent ) {
+
+		// Make a writable jQuery.Event from the native event object
+		var event = jQuery.event.fix( nativeEvent );
+
+		var i, j, ret, matched, handleObj, handlerQueue,
+			args = new Array( arguments.length ),
+			handlers = ( dataPriv.get( this, "events" ) || {} )[ event.type ] || [],
+			special = jQuery.event.special[ event.type ] || {};
+
+		// Use the fix-ed jQuery.Event rather than the (read-only) native event
+		args[ 0 ] = event;
+
+		for ( i = 1; i < arguments.length; i++ ) {
+			args[ i ] = arguments[ i ];
+		}
+
+		event.delegateTarget = this;
+
+		// Call the preDispatch hook for the mapped type, and let it bail if desired
+		if ( special.preDispatch && special.preDispatch.call( this, event ) === false ) {
+			return;
+		}
+
+		// Determine handlers
+		handlerQueue = jQuery.event.handlers.call( this, event, handlers );
+
+		// Run delegates first; they may want to stop propagation beneath us
+		i = 0;
+		while ( ( matched = handlerQueue[ i++ ] ) && !event.isPropagationStopped() ) {
+			event.currentTarget = matched.elem;
+
+			j = 0;
+			while ( ( handleObj = matched.handlers[ j++ ] ) &&
+				!event.isImmediatePropagationStopped() ) {
+
+				// Triggered event must either 1) have no namespace, or 2) have namespace(s)
+				// a subset or equal to those in the bound event (both can have no namespace).
+				if ( !event.rnamespace || event.rnamespace.test( handleObj.namespace ) ) {
+
+					event.handleObj = handleObj;
+					event.data = handleObj.data;
+
+					ret = ( ( jQuery.event.special[ handleObj.origType ] || {} ).handle ||
+						handleObj.handler ).apply( matched.elem, args );
+
+					if ( ret !== undefined ) {
+						if ( ( event.result = ret ) === false ) {
+							event.preventDefault();
+							event.stopPropagation();
+						}
+					}
+				}
+			}
+		}
+
+		// Call the postDispatch hook for the mapped type
+		if ( special.postDispatch ) {
+			special.postDispatch.call( this, event );
+		}
+
+		return event.result;
+	},
+
+	handlers: function( event, handlers ) {
+		var i, matches, sel, handleObj,
+			handlerQueue = [],
+			delegateCount = handlers.delegateCount,
+			cur = event.target;
+
+		// Support: IE <=9
+		// Find delegate handlers
+		// Black-hole SVG <use> instance trees (#13180)
+		//
+		// Support: Firefox <=42
+		// Avoid non-left-click in FF but don't block IE radio events (#3861, gh-2343)
+		if ( delegateCount && cur.nodeType &&
+			( event.type !== "click" || isNaN( event.button ) || event.button < 1 ) ) {
+
+			for ( ; cur !== this; cur = cur.parentNode || this ) {
+
+				// Don't check non-elements (#13208)
+				// Don't process clicks on disabled elements (#6911, #8165, #11382, #11764)
+				if ( cur.nodeType === 1 && ( cur.disabled !== true || event.type !== "click" ) ) {
+					matches = [];
+					for ( i = 0; i < delegateCount; i++ ) {
+						handleObj = handlers[ i ];
+
+						// Don't conflict with Object.prototype properties (#13203)
+						sel = handleObj.selector + " ";
+
+						if ( matches[ sel ] === undefined ) {
+							matches[ sel ] = handleObj.needsContext ?
+								jQuery( sel, this ).index( cur ) > -1 :
+								jQuery.find( sel, this, null, [ cur ] ).length;
+						}
+						if ( matches[ sel ] ) {
+							matches.push( handleObj );
+						}
+					}
+					if ( matches.length ) {
+						handlerQueue.push( { elem: cur, handlers: matches } );
+					}
+				}
+			}
+		}
+
+		// Add the remaining (directly-bound) handlers
+		if ( delegateCount < handlers.length ) {
+			handlerQueue.push( { elem: this, handlers: handlers.slice( delegateCount ) } );
+		}
+
+		return handlerQueue;
+	},
+
+	addProp: function( name, hook ) {
+		Object.defineProperty( jQuery.Event.prototype, name, {
+			enumerable: true,
+			configurable: true,
+
+			get: jQuery.isFunction( hook ) ?
+				function() {
+					if ( this.originalEvent ) {
+							return hook( this.originalEvent );
+					}
+				} :
+				function() {
+					if ( this.originalEvent ) {
+							return this.originalEvent[ name ];
+					}
+				},
+
+			set: function( value ) {
+				Object.defineProperty( this, name, {
+					enumerable: true,
+					configurable: true,
+					writable: true,
+					value: value
+				} );
+			}
+		} );
+	},
+
+	fix: function( originalEvent ) {
+		return originalEvent[ jQuery.expando ] ?
+			originalEvent :
+			new jQuery.Event( originalEvent );
+	},
+
+	special: {
+		load: {
+
+			// Prevent triggered image.load events from bubbling to window.load
+			noBubble: true
+		},
+		focus: {
+
+			// Fire native event if possible so blur/focus sequence is correct
+			trigger: function() {
+				if ( this !== safeActiveElement() && this.focus ) {
+					this.focus();
+					return false;
+				}
+			},
+			delegateType: "focusin"
+		},
+		blur: {
+			trigger: function() {
+				if ( this === safeActiveElement() && this.blur ) {
+					this.blur();
+					return false;
+				}
+			},
+			delegateType: "focusout"
+		},
+		click: {
+
+			// For checkbox, fire native event so checked state will be right
+			trigger: function() {
+				if ( this.type === "checkbox" && this.click && jQuery.nodeName( this, "input" ) ) {
+					this.click();
+					return false;
+				}
+			},
+
+			// For cross-browser consistency, don't fire native .click() on links
+			_default: function( event ) {
+				return jQuery.nodeName( event.target, "a" );
+			}
+		},
+
+		beforeunload: {
+			postDispatch: function( event ) {
+
+				// Support: Firefox 20+
+				// Firefox doesn't alert if the returnValue field is not set.
+				if ( event.result !== undefined && event.originalEvent ) {
+					event.originalEvent.returnValue = event.result;
+				}
+			}
+		}
+	}
+};
+
+jQuery.removeEvent = function( elem, type, handle ) {
+
+	// This "if" is needed for plain objects
+	if ( elem.removeEventListener ) {
+		elem.removeEventListener( type, handle );
+	}
+};
+
+jQuery.Event = function( src, props ) {
+
+	// Allow instantiation without the 'new' keyword
+	if ( !( this instanceof jQuery.Event ) ) {
+		return new jQuery.Event( src, props );
+	}
+
+	// Event object
+	if ( src && src.type ) {
+		this.originalEvent = src;
+		this.type = src.type;
+
+		// Events bubbling up the document may have been marked as prevented
+		// by a handler lower down the tree; reflect the correct value.
+		this.isDefaultPrevented = src.defaultPrevented ||
+				src.defaultPrevented === undefined &&
+
+				// Support: Android <=2.3 only
+				src.returnValue === false ?
+			returnTrue :
+			returnFalse;
+
+		// Create target properties
+		// Support: Safari <=6 - 7 only
+		// Target should not be a text node (#504, #13143)
+		this.target = ( src.target && src.target.nodeType === 3 ) ?
+			src.target.parentNode :
+			src.target;
+
+		this.currentTarget = src.currentTarget;
+		this.relatedTarget = src.relatedTarget;
+
+	// Event type
+	} else {
+		this.type = src;
+	}
+
+	// Put explicitly provided properties onto the event object
+	if ( props ) {
+		jQuery.extend( this, props );
+	}
+
+	// Create a timestamp if incoming event doesn't have one
+	this.timeStamp = src && src.timeStamp || jQuery.now();
+
+	// Mark it as fixed
+	this[ jQuery.expando ] = true;
+};
+
+// jQuery.Event is based on DOM3 Events as specified by the ECMAScript Language Binding
+// https://www.w3.org/TR/2003/WD-DOM-Level-3-Events-20030331/ecma-script-binding.html
+jQuery.Event.prototype = {
+	constructor: jQuery.Event,
+	isDefaultPrevented: returnFalse,
+	isPropagationStopped: returnFalse,
+	isImmediatePropagationStopped: returnFalse,
+	isSimulated: false,
+
+	preventDefault: function() {
+		var e = this.originalEvent;
+
+		this.isDefaultPrevented = returnTrue;
+
+		if ( e && !this.isSimulated ) {
+			e.preventDefault();
+		}
+	},
+	stopPropagation: function() {
+		var e = this.originalEvent;
+
+		this.isPropagationStopped = returnTrue;
+
+		if ( e && !this.isSimulated ) {
+			e.stopPropagation();
+		}
+	},
+	stopImmediatePropagation: function() {
+		var e = this.originalEvent;
+
+		this.isImmediatePropagationStopped = returnTrue;
+
+		if ( e && !this.isSimulated ) {
+			e.stopImmediatePropagation();
+		}
+
+		this.stopPropagation();
+	}
+};
+
+// Includes all common event props including KeyEvent and MouseEvent specific props
+jQuery.each( {
+	altKey: true,
+	bubbles: true,
+	cancelable: true,
+	changedTouches: true,
+	ctrlKey: true,
+	detail: true,
+	eventPhase: true,
+	metaKey: true,
+	pageX: true,
+	pageY: true,
+	shiftKey: true,
+	view: true,
+	"char": true,
+	charCode: true,
+	key: true,
+	keyCode: true,
+	button: true,
+	buttons: true,
+	clientX: true,
+	clientY: true,
+	offsetX: true,
+	offsetY: true,
+	pointerId: true,
+	pointerType: true,
+	screenX: true,
+	screenY: true,
+	targetTouches: true,
+	toElement: true,
+	touches: true,
+
+	which: function( event ) {
+		var button = event.button;
+
+		// Add which for key events
+		if ( event.which == null && rkeyEvent.test( event.type ) ) {
+			return event.charCode != null ? event.charCode : event.keyCode;
+		}
+
+		// Add which for click: 1 === left; 2 === middle; 3 === right
+		if ( !event.which && button !== undefined && rmouseEvent.test( event.type ) ) {
+			return ( button & 1 ? 1 : ( button & 2 ? 3 : ( button & 4 ? 2 : 0 ) ) );
+		}
+
+		return event.which;
+	}
+}, jQuery.event.addProp );
+
+// Create mouseenter/leave events using mouseover/out and event-time checks
+// so that event delegation works in jQuery.
+// Do the same for pointerenter/pointerleave and pointerover/pointerout
+//
+// Support: Safari 7 only
+// Safari sends mouseenter too often; see:
+// https://bugs.chromium.org/p/chromium/issues/detail?id=470258
+// for the description of the bug (it existed in older Chrome versions as well).
+jQuery.each( {
+	mouseenter: "mouseover",
+	mouseleave: "mouseout",
+	pointerenter: "pointerover",
+	pointerleave: "pointerout"
+}, function( orig, fix ) {
+	jQuery.event.special[ orig ] = {
+		delegateType: fix,
+		bindType: fix,
+
+		handle: function( event ) {
+			var ret,
+				target = this,
+				related = event.relatedTarget,
+				handleObj = event.handleObj;
+
+			// For mouseenter/leave call the handler if related is outside the target.
+			// NB: No relatedTarget if the mouse left/entered the browser window
+			if ( !related || ( related !== target && !jQuery.contains( target, related ) ) ) {
+				event.type = handleObj.origType;
+				ret = handleObj.handler.apply( this, arguments );
+				event.type = fix;
+			}
+			return ret;
+		}
+	};
+} );
+
+jQuery.fn.extend( {
+
+	on: function( types, selector, data, fn ) {
+		return on( this, types, selector, data, fn );
+	},
+	one: function( types, selector, data, fn ) {
+		return on( this, types, selector, data, fn, 1 );
+	},
+	off: function( types, selector, fn ) {
+		var handleObj, type;
+		if ( types && types.preventDefault && types.handleObj ) {
+
+			// ( event )  dispatched jQuery.Event
+			handleObj = types.handleObj;
+			jQuery( types.delegateTarget ).off(
+				handleObj.namespace ?
+					handleObj.origType + "." + handleObj.namespace :
+					handleObj.origType,
+				handleObj.selector,
+				handleObj.handler
+			);
+			return this;
+		}
+		if ( typeof types === "object" ) {
+
+			// ( types-object [, selector] )
+			for ( type in types ) {
+				this.off( type, selector, types[ type ] );
+			}
+			return this;
+		}
+		if ( selector === false || typeof selector === "function" ) {
+
+			// ( types [, fn] )
+			fn = selector;
+			selector = undefined;
+		}
+		if ( fn === false ) {
+			fn = returnFalse;
+		}
+		return this.each( function() {
+			jQuery.event.remove( this, types, fn, selector );
+		} );
+	}
+} );
+
+
+var
+
+	/* eslint-disable max-len */
+
+	// See https://github.com/eslint/eslint/issues/3229
+	rxhtmlTag = /<(?!area|br|col|embed|hr|img|input|link|meta|param)(([a-z][^\/\0>\x20\t\r\n\f]*)[^>]*)\/>/gi,
+
+	/* eslint-enable */
+
+	// Support: IE <=10 - 11, Edge 12 - 13
+	// In IE/Edge using regex groups here causes severe slowdowns.
+	// See https://connect.microsoft.com/IE/feedback/details/1736512/
+	rnoInnerhtml = /<script|<style|<link/i,
+
+	// checked="checked" or checked
+	rchecked = /checked\s*(?:[^=]|=\s*.checked.)/i,
+	rscriptTypeMasked = /^true\/(.*)/,
+	rcleanScript = /^\s*<!(?:\[CDATA\[|--)|(?:\]\]|--)>\s*$/g;
+
+function manipulationTarget( elem, content ) {
+	if ( jQuery.nodeName( elem, "table" ) &&
+		jQuery.nodeName( content.nodeType !== 11 ? content : content.firstChild, "tr" ) ) {
+
+		return elem.getElementsByTagName( "tbody" )[ 0 ] || elem;
+	}
+
+	return elem;
+}
+
+// Replace/restore the type attribute of script elements for safe DOM manipulation
+function disableScript( elem ) {
+	elem.type = ( elem.getAttribute( "type" ) !== null ) + "/" + elem.type;
+	return elem;
+}
+function restoreScript( elem ) {
+	var match = rscriptTypeMasked.exec( elem.type );
+
+	if ( match ) {
+		elem.type = match[ 1 ];
+	} else {
+		elem.removeAttribute( "type" );
+	}
+
+	return elem;
+}
+
+function cloneCopyEvent( src, dest ) {
+	var i, l, type, pdataOld, pdataCur, udataOld, udataCur, events;
+
+	if ( dest.nodeType !== 1 ) {
+		return;
+	}
+
+	// 1. Copy private data: events, handlers, etc.
+	if ( dataPriv.hasData( src ) ) {
+		pdataOld = dataPriv.access( src );
+		pdataCur = dataPriv.set( dest, pdataOld );
+		events = pdataOld.events;
+
+		if ( events ) {
+			delete pdataCur.handle;
+			pdataCur.events = {};
+
+			for ( type in events ) {
+				for ( i = 0, l = events[ type ].length; i < l; i++ ) {
+					jQuery.event.add( dest, type, events[ type ][ i ] );
+				}
+			}
+		}
+	}
+
+	// 2. Copy user data
+	if ( dataUser.hasData( src ) ) {
+		udataOld = dataUser.access( src );
+		udataCur = jQuery.extend( {}, udataOld );
+
+		dataUser.set( dest, udataCur );
+	}
+}
+
+// Fix IE bugs, see support tests
+function fixInput( src, dest ) {
+	var nodeName = dest.nodeName.toLowerCase();
+
+	// Fails to persist the checked state of a cloned checkbox or radio button.
+	if ( nodeName === "input" && rcheckableType.test( src.type ) ) {
+		dest.checked = src.checked;
+
+	// Fails to return the selected option to the default selected state when cloning options
+	} else if ( nodeName === "input" || nodeName === "textarea" ) {
+		dest.defaultValue = src.defaultValue;
+	}
+}
+
+function domManip( collection, args, callback, ignored ) {
+
+	// Flatten any nested arrays
+	args = concat.apply( [], args );
+
+	var fragment, first, scripts, hasScripts, node, doc,
+		i = 0,
+		l = collection.length,
+		iNoClone = l - 1,
+		value = args[ 0 ],
+		isFunction = jQuery.isFunction( value );
+
+	// We can't cloneNode fragments that contain checked, in WebKit
+	if ( isFunction ||
+			( l > 1 && typeof value === "string" &&
+				!support.checkClone && rchecked.test( value ) ) ) {
+		return collection.each( function( index ) {
+			var self = collection.eq( index );
+			if ( isFunction ) {
+				args[ 0 ] = value.call( this, index, self.html() );
+			}
+			domManip( self, args, callback, ignored );
+		} );
+	}
+
+	if ( l ) {
+		fragment = buildFragment( args, collection[ 0 ].ownerDocument, false, collection, ignored );
+		first = fragment.firstChild;
+
+		if ( fragment.childNodes.length === 1 ) {
+			fragment = first;
+		}
+
+		// Require either new content or an interest in ignored elements to invoke the callback
+		if ( first || ignored ) {
+			scripts = jQuery.map( getAll( fragment, "script" ), disableScript );
+			hasScripts = scripts.length;
+
+			// Use the original fragment for the last item
+			// instead of the first because it can end up
+			// being emptied incorrectly in certain situations (#8070).
+			for ( ; i < l; i++ ) {
+				node = fragment;
+
+				if ( i !== iNoClone ) {
+					node = jQuery.clone( node, true, true );
+
+					// Keep references to cloned scripts for later restoration
+					if ( hasScripts ) {
+
+						// Support: Android <=4.0 only, PhantomJS 1 only
+						// push.apply(_, arraylike) throws on ancient WebKit
+						jQuery.merge( scripts, getAll( node, "script" ) );
+					}
+				}
+
+				callback.call( collection[ i ], node, i );
+			}
+
+			if ( hasScripts ) {
+				doc = scripts[ scripts.length - 1 ].ownerDocument;
+
+				// Reenable scripts
+				jQuery.map( scripts, restoreScript );
+
+				// Evaluate executable scripts on first document insertion
+				for ( i = 0; i < hasScripts; i++ ) {
+					node = scripts[ i ];
+					if ( rscriptType.test( node.type || "" ) &&
+						!dataPriv.access( node, "globalEval" ) &&
+						jQuery.contains( doc, node ) ) {
+
+						if ( node.src ) {
+
+							// Optional AJAX dependency, but won't run scripts if not present
+							if ( jQuery._evalUrl ) {
+								jQuery._evalUrl( node.src );
+							}
+						} else {
+							DOMEval( node.textContent.replace( rcleanScript, "" ), doc );
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return collection;
+}
+
+function remove( elem, selector, keepData ) {
+	var node,
+		nodes = selector ? jQuery.filter( selector, elem ) : elem,
+		i = 0;
+
+	for ( ; ( node = nodes[ i ] ) != null; i++ ) {
+		if ( !keepData && node.nodeType === 1 ) {
+			jQuery.cleanData( getAll( node ) );
+		}
+
+		if ( node.parentNode ) {
+			if ( keepData && jQuery.contains( node.ownerDocument, node ) ) {
+				setGlobalEval( getAll( node, "script" ) );
+			}
+			node.parentNode.removeChild( node );
+		}
+	}
+
+	return elem;
+}
+
+jQuery.extend( {
+	htmlPrefilter: function( html ) {
+		return html.replace( rxhtmlTag, "<$1></$2>" );
+	},
+
+	clone: function( elem, dataAndEvents, deepDataAndEvents ) {
+		var i, l, srcElements, destElements,
+			clone = elem.cloneNode( true ),
+			inPage = jQuery.contains( elem.ownerDocument, elem );
+
+		// Fix IE cloning issues
+		if ( !support.noCloneChecked && ( elem.nodeType === 1 || elem.nodeType === 11 ) &&
+				!jQuery.isXMLDoc( elem ) ) {
+
+			// We eschew Sizzle here for performance reasons: https://jsperf.com/getall-vs-sizzle/2
+			destElements = getAll( clone );
+			srcElements = getAll( elem );
+
+			for ( i = 0, l = srcElements.length; i < l; i++ ) {
+				fixInput( srcElements[ i ], destElements[ i ] );
+			}
+		}
+
+		// Copy the events from the original to the clone
+		if ( dataAndEvents ) {
+			if ( deepDataAndEvents ) {
+				srcElements = srcElements || getAll( elem );
+				destElements = destElements || getAll( clone );
+
+				for ( i = 0, l = srcElements.length; i < l; i++ ) {
+					cloneCopyEvent( srcElements[ i ], destElements[ i ] );
+				}
+			} else {
+				cloneCopyEvent( elem, clone );
+			}
+		}
+
+		// Preserve script evaluation history
+		destElements = getAll( clone, "script" );
+		if ( destElements.length > 0 ) {
+			setGlobalEval( destElements, !inPage && getAll( elem, "script" ) );
+		}
+
+		// Return the cloned set
+		return clone;
+	},
+
+	cleanData: function( elems ) {
+		var data, elem, type,
+			special = jQuery.event.special,
+			i = 0;
+
+		for ( ; ( elem = elems[ i ] ) !== undefined; i++ ) {
+			if ( acceptData( elem ) ) {
+				if ( ( data = elem[ dataPriv.expando ] ) ) {
+					if ( data.events ) {
+						for ( type in data.events ) {
+							if ( special[ type ] ) {
+								jQuery.event.remove( elem, type );
+
+							// This is a shortcut to avoid jQuery.event.remove's overhead
+							} else {
+								jQuery.removeEvent( elem, type, data.handle );
+							}
+						}
+					}
+
+					// Support: Chrome <=35 - 45+
+					// Assign undefined instead of using delete, see Data#remove
+					elem[ dataPriv.expando ] = undefined;
+				}
+				if ( elem[ dataUser.expando ] ) {
+
+					// Support: Chrome <=35 - 45+
+					// Assign undefined instead of using delete, see Data#remove
+					elem[ dataUser.expando ] = undefined;
+				}
+			}
+		}
+	}
+} );
+
+jQuery.fn.extend( {
+	detach: function( selector ) {
+		return remove( this, selector, true );
+	},
+
+	remove: function( selector ) {
+		return remove( this, selector );
+	},
+
+	text: function( value ) {
+		return access( this, function( value ) {
+			return value === undefined ?
+				jQuery.text( this ) :
+				this.empty().each( function() {
+					if ( this.nodeType === 1 || this.nodeType === 11 || this.nodeType === 9 ) {
+						this.textContent = value;
+					}
+				} );
+		}, null, value, arguments.length );
+	},
+
+	append: function() {
+		return domManip( this, arguments, function( elem ) {
+			if ( this.nodeType === 1 || this.nodeType === 11 || this.nodeType === 9 ) {
+				var target = manipulationTarget( this, elem );
+				target.appendChild( elem );
+			}
+		} );
+	},
+
+	prepend: function() {
+		return domManip( this, arguments, function( elem ) {
+			if ( this.nodeType === 1 || this.nodeType === 11 || this.nodeType === 9 ) {
+				var target = manipulationTarget( this, elem );
+				target.insertBefore( elem, target.firstChild );
+			}
+		} );
+	},
+
+	before: function() {
+		return domManip( this, arguments, function( elem ) {
+			if ( this.parentNode ) {
+				this.parentNode.insertBefore( elem, this );
+			}
+		} );
+	},
+
+	after: function() {
+		return domManip( this, arguments, function( elem ) {
+			if ( this.parentNode ) {
+				this.parentNode.insertBefore( elem, this.nextSibling );
+			}
+		} );
+	},
+
+	empty: function() {
+		var elem,
+			i = 0;
+
+		for ( ; ( elem = this[ i ] ) != null; i++ ) {
+			if ( elem.nodeType === 1 ) {
+
+				// Prevent memory leaks
+				jQuery.cleanData( getAll( elem, false ) );
+
+				// Remove any remaining nodes
+				elem.textContent = "";
+			}
+		}
+
+		return this;
+	},
+
+	clone: function( dataAndEvents, deepDataAndEvents ) {
+		dataAndEvents = dataAndEvents == null ? false : dataAndEvents;
+		deepDataAndEvents = deepDataAndEvents == null ? dataAndEvents : deepDataAndEvents;
+
+		return this.map( function() {
+			return jQuery.clone( this, dataAndEvents, deepDataAndEvents );
+		} );
+	},
+
+	html: function( value ) {
+		return access( this, function( value ) {
+			var elem = this[ 0 ] || {},
+				i = 0,
+				l = this.length;
+
+			if ( value === undefined && elem.nodeType === 1 ) {
+				return elem.innerHTML;
+			}
+
+			// See if we can take a shortcut and just use innerHTML
+			if ( typeof value === "string" && !rnoInnerhtml.test( value ) &&
+				!wrapMap[ ( rtagName.exec( value ) || [ "", "" ] )[ 1 ].toLowerCase() ] ) {
+
+				value = jQuery.htmlPrefilter( value );
+
+				try {
+					for ( ; i < l; i++ ) {
+						elem = this[ i ] || {};
+
+						// Remove element nodes and prevent memory leaks
+						if ( elem.nodeType === 1 ) {
+							jQuery.cleanData( getAll( elem, false ) );
+							elem.innerHTML = value;
+						}
+					}
+
+					elem = 0;
+
+				// If using innerHTML throws an exception, use the fallback method
+				} catch ( e ) {}
+			}
+
+			if ( elem ) {
+				this.empty().append( value );
+			}
+		}, null, value, arguments.length );
+	},
+
+	replaceWith: function() {
+		var ignored = [];
+
+		// Make the changes, replacing each non-ignored context element with the new content
+		return domManip( this, arguments, function( elem ) {
+			var parent = this.parentNode;
+
+			if ( jQuery.inArray( this, ignored ) < 0 ) {
+				jQuery.cleanData( getAll( this ) );
+				if ( parent ) {
+					parent.replaceChild( elem, this );
+				}
+			}
+
+		// Force callback invocation
+		}, ignored );
+	}
+} );
+
+jQuery.each( {
+	appendTo: "append",
+	prependTo: "prepend",
+	insertBefore: "before",
+	insertAfter: "after",
+	replaceAll: "replaceWith"
+}, function( name, original ) {
+	jQuery.fn[ name ] = function( selector ) {
+		var elems,
+			ret = [],
+			insert = jQuery( selector ),
+			last = insert.length - 1,
+			i = 0;
+
+		for ( ; i <= last; i++ ) {
+			elems = i === last ? this : this.clone( true );
+			jQuery( insert[ i ] )[ original ]( elems );
+
+			// Support: Android <=4.0 only, PhantomJS 1 only
+			// .get() because push.apply(_, arraylike) throws on ancient WebKit
+			push.apply( ret, elems.get() );
+		}
+
+		return this.pushStack( ret );
+	};
+} );
+var rmargin = ( /^margin/ );
+
+var rnumnonpx = new RegExp( "^(" + pnum + ")(?!px)[a-z%]+$", "i" );
+
+var getStyles = function( elem ) {
+
+		// Support: IE <=11 only, Firefox <=30 (#15098, #14150)
+		// IE throws on elements created in popups
+		// FF meanwhile throws on frame elements through "defaultView.getComputedStyle"
+		var view = elem.ownerDocument.defaultView;
+
+		if ( !view || !view.opener ) {
+			view = window;
+		}
+
+		return view.getComputedStyle( elem );
+	};
+
+
+
+( function() {
+
+	// Executing both pixelPosition & boxSizingReliable tests require only one layout
+	// so they're executed at the same time to save the second computation.
+	function computeStyleTests() {
+
+		// This is a singleton, we need to execute it only once
+		if ( !div ) {
+			return;
+		}
+
+		div.style.cssText =
+			"box-sizing:border-box;" +
+			"position:relative;display:block;" +
+			"margin:auto;border:1px;padding:1px;" +
+			"top:1%;width:50%";
+		div.innerHTML = "";
+		documentElement.appendChild( container );
+
+		var divStyle = window.getComputedStyle( div );
+		pixelPositionVal = divStyle.top !== "1%";
+
+		// Support: Android 4.0 - 4.3 only, Firefox <=3 - 44
+		reliableMarginLeftVal = divStyle.marginLeft === "2px";
+		boxSizingReliableVal = divStyle.width === "4px";
+
+		// Support: Android 4.0 - 4.3 only
+		// Some styles come back with percentage values, even though they shouldn't
+		div.style.marginRight = "50%";
+		pixelMarginRightVal = divStyle.marginRight === "4px";
+
+		documentElement.removeChild( container );
+
+		// Nullify the div so it wouldn't be stored in the memory and
+		// it will also be a sign that checks already performed
+		div = null;
+	}
+
+	var pixelPositionVal, boxSizingReliableVal, pixelMarginRightVal, reliableMarginLeftVal,
+		container = document.createElement( "div" ),
+		div = document.createElement( "div" );
+
+	// Finish early in limited (non-browser) environments
+	if ( !div.style ) {
+		return;
+	}
+
+	// Support: IE <=9 - 11 only
+	// Style of cloned element affects source element cloned (#8908)
+	div.style.backgroundClip = "content-box";
+	div.cloneNode( true ).style.backgroundClip = "";
+	support.clearCloneStyle = div.style.backgroundClip === "content-box";
+
+	container.style.cssText = "border:0;width:8px;height:0;top:0;left:-9999px;" +
+		"padding:0;margin-top:1px;position:absolute";
+	container.appendChild( div );
+
+	jQuery.extend( support, {
+		pixelPosition: function() {
+			computeStyleTests();
+			return pixelPositionVal;
+		},
+		boxSizingReliable: function() {
+			computeStyleTests();
+			return boxSizingReliableVal;
+		},
+		pixelMarginRight: function() {
+			computeStyleTests();
+			return pixelMarginRightVal;
+		},
+		reliableMarginLeft: function() {
+			computeStyleTests();
+			return reliableMarginLeftVal;
+		}
+	} );
+} )();
+
+
+function curCSS( elem, name, computed ) {
+	var width, minWidth, maxWidth, ret,
+		style = elem.style;
+
+	computed = computed || getStyles( elem );
+
+	// Support: IE <=9 only
+	// getPropertyValue is only needed for .css('filter') (#12537)
+	if ( computed ) {
+		ret = computed.getPropertyValue( name ) || computed[ name ];
+
+		if ( ret === "" && !jQuery.contains( elem.ownerDocument, elem ) ) {
+			ret = jQuery.style( elem, name );
+		}
+
+		// A tribute to the "awesome hack by Dean Edwards"
+		// Android Browser returns percentage for some values,
+		// but width seems to be reliably pixels.
+		// This is against the CSSOM draft spec:
+		// https://drafts.csswg.org/cssom/#resolved-values
+		if ( !support.pixelMarginRight() && rnumnonpx.test( ret ) && rmargin.test( name ) ) {
+
+			// Remember the original values
+			width = style.width;
+			minWidth = style.minWidth;
+			maxWidth = style.maxWidth;
+
+			// Put in the new values to get a computed value out
+			style.minWidth = style.maxWidth = style.width = ret;
+			ret = computed.width;
+
+			// Revert the changed values
+			style.width = width;
+			style.minWidth = minWidth;
+			style.maxWidth = maxWidth;
+		}
+	}
+
+	return ret !== undefined ?
+
+		// Support: IE <=9 - 11 only
+		// IE returns zIndex value as an integer.
+		ret + "" :
+		ret;
+}
+
+
+function addGetHookIf( conditionFn, hookFn ) {
+
+	// Define the hook, we'll check on the first run if it's really needed.
+	return {
+		get: function() {
+			if ( conditionFn() ) {
+
+				// Hook not needed (or it's not possible to use it due
+				// to missing dependency), remove it.
+				delete this.get;
+				return;
+			}
+
+			// Hook needed; redefine it so that the support test is not executed again.
+			return ( this.get = hookFn ).apply( this, arguments );
+		}
+	};
+}
+
+
+var
+
+	// Swappable if display is none or starts with table
+	// except "table", "table-cell", or "table-caption"
+	// See here for display values: https://developer.mozilla.org/en-US/docs/CSS/display
+	rdisplayswap = /^(none|table(?!-c[ea]).+)/,
+	cssShow = { position: "absolute", visibility: "hidden", display: "block" },
+	cssNormalTransform = {
+		letterSpacing: "0",
+		fontWeight: "400"
+	},
+
+	cssPrefixes = [ "Webkit", "Moz", "ms" ],
+	emptyStyle = document.createElement( "div" ).style;
+
+// Return a css property mapped to a potentially vendor prefixed property
+function vendorPropName( name ) {
+
+	// Shortcut for names that are not vendor prefixed
+	if ( name in emptyStyle ) {
+		return name;
+	}
+
+	// Check for vendor prefixed names
+	var capName = name[ 0 ].toUpperCase() + name.slice( 1 ),
+		i = cssPrefixes.length;
+
+	while ( i-- ) {
+		name = cssPrefixes[ i ] + capName;
+		if ( name in emptyStyle ) {
+			return name;
+		}
+	}
+}
+
+function setPositiveNumber( elem, value, subtract ) {
+
+	// Any relative (+/-) values have already been
+	// normalized at this point
+	var matches = rcssNum.exec( value );
+	return matches ?
+
+		// Guard against undefined "subtract", e.g., when used as in cssHooks
+		Math.max( 0, matches[ 2 ] - ( subtract || 0 ) ) + ( matches[ 3 ] || "px" ) :
+		value;
+}
+
+function augmentWidthOrHeight( elem, name, extra, isBorderBox, styles ) {
+	var i = extra === ( isBorderBox ? "border" : "content" ) ?
+
+		// If we already have the right measurement, avoid augmentation
+		4 :
+
+		// Otherwise initialize for horizontal or vertical properties
+		name === "width" ? 1 : 0,
+
+		val = 0;
+
+	for ( ; i < 4; i += 2 ) {
+
+		// Both box models exclude margin, so add it if we want it
+		if ( extra === "margin" ) {
+			val += jQuery.css( elem, extra + cssExpand[ i ], true, styles );
+		}
+
+		if ( isBorderBox ) {
+
+			// border-box includes padding, so remove it if we want content
+			if ( extra === "content" ) {
+				val -= jQuery.css( elem, "padding" + cssExpand[ i ], true, styles );
+			}
+
+			// At this point, extra isn't border nor margin, so remove border
+			if ( extra !== "margin" ) {
+				val -= jQuery.css( elem, "border" + cssExpand[ i ] + "Width", true, styles );
+			}
+		} else {
+
+			// At this point, extra isn't content, so add padding
+			val += jQuery.css( elem, "padding" + cssExpand[ i ], true, styles );
+
+			// At this point, extra isn't content nor padding, so add border
+			if ( extra !== "padding" ) {
+				val += jQuery.css( elem, "border" + cssExpand[ i ] + "Width", true, styles );
+			}
+		}
+	}
+
+	return val;
+}
+
+function getWidthOrHeight( elem, name, extra ) {
+
+	// Start with offset property, which is equivalent to the border-box value
+	var val,
+		valueIsBorderBox = true,
+		styles = getStyles( elem ),
+		isBorderBox = jQuery.css( elem, "boxSizing", false, styles ) === "border-box";
+
+	// Support: IE <=11 only
+	// Running getBoundingClientRect on a disconnected node
+	// in IE throws an error.
+	if ( elem.getClientRects().length ) {
+		val = elem.getBoundingClientRect()[ name ];
+	}
+
+	// Some non-html elements return undefined for offsetWidth, so check for null/undefined
+	// svg - https://bugzilla.mozilla.org/show_bug.cgi?id=649285
+	// MathML - https://bugzilla.mozilla.org/show_bug.cgi?id=491668
+	if ( val <= 0 || val == null ) {
+
+		// Fall back to computed then uncomputed css if necessary
+		val = curCSS( elem, name, styles );
+		if ( val < 0 || val == null ) {
+			val = elem.style[ name ];
+		}
+
+		// Computed unit is not pixels. Stop here and return.
+		if ( rnumnonpx.test( val ) ) {
+			return val;
+		}
+
+		// Check for style in case a browser which returns unreliable values
+		// for getComputedStyle silently falls back to the reliable elem.style
+		valueIsBorderBox = isBorderBox &&
+			( support.boxSizingReliable() || val === elem.style[ name ] );
+
+		// Normalize "", auto, and prepare for extra
+		val = parseFloat( val ) || 0;
+	}
+
+	// Use the active box-sizing model to add/subtract irrelevant styles
+	return ( val +
+		augmentWidthOrHeight(
+			elem,
+			name,
+			extra || ( isBorderBox ? "border" : "content" ),
+			valueIsBorderBox,
+			styles
+		)
+	) + "px";
+}
+
+jQuery.extend( {
+
+	// Add in style property hooks for overriding the default
+	// behavior of getting and setting a style property
+	cssHooks: {
+		opacity: {
+			get: function( elem, computed ) {
+				if ( computed ) {
+
+					// We should always get a number back from opacity
+					var ret = curCSS( elem, "opacity" );
+					return ret === "" ? "1" : ret;
+				}
+			}
+		}
+	},
+
+	// Don't automatically add "px" to these possibly-unitless properties
+	cssNumber: {
+		"animationIterationCount": true,
+		"columnCount": true,
+		"fillOpacity": true,
+		"flexGrow": true,
+		"flexShrink": true,
+		"fontWeight": true,
+		"lineHeight": true,
+		"opacity": true,
+		"order": true,
+		"orphans": true,
+		"widows": true,
+		"zIndex": true,
+		"zoom": true
+	},
+
+	// Add in properties whose names you wish to fix before
+	// setting or getting the value
+	cssProps: {
+		"float": "cssFloat"
+	},
+
+	// Get and set the style property on a DOM Node
+	style: function( elem, name, value, extra ) {
+
+		// Don't set styles on text and comment nodes
+		if ( !elem || elem.nodeType === 3 || elem.nodeType === 8 || !elem.style ) {
+			return;
+		}
+
+		// Make sure that we're working with the right name
+		var ret, type, hooks,
+			origName = jQuery.camelCase( name ),
+			style = elem.style;
+
+		name = jQuery.cssProps[ origName ] ||
+			( jQuery.cssProps[ origName ] = vendorPropName( origName ) || origName );
+
+		// Gets hook for the prefixed version, then unprefixed version
+		hooks = jQuery.cssHooks[ name ] || jQuery.cssHooks[ origName ];
+
+		// Check if we're setting a value
+		if ( value !== undefined ) {
+			type = typeof value;
+
+			// Convert "+=" or "-=" to relative numbers (#7345)
+			if ( type === "string" && ( ret = rcssNum.exec( value ) ) && ret[ 1 ] ) {
+				value = adjustCSS( elem, name, ret );
+
+				// Fixes bug #9237
+				type = "number";
+			}
+
+			// Make sure that null and NaN values aren't set (#7116)
+			if ( value == null || value !== value ) {
+				return;
+			}
+
+			// If a number was passed in, add the unit (except for certain CSS properties)
+			if ( type === "number" ) {
+				value += ret && ret[ 3 ] || ( jQuery.cssNumber[ origName ] ? "" : "px" );
+			}
+
+			// background-* props affect original clone's values
+			if ( !support.clearCloneStyle && value === "" && name.indexOf( "background" ) === 0 ) {
+				style[ name ] = "inherit";
+			}
+
+			// If a hook was provided, use that value, otherwise just set the specified value
+			if ( !hooks || !( "set" in hooks ) ||
+				( value = hooks.set( elem, value, extra ) ) !== undefined ) {
+
+				style[ name ] = value;
+			}
+
+		} else {
+
+			// If a hook was provided get the non-computed value from there
+			if ( hooks && "get" in hooks &&
+				( ret = hooks.get( elem, false, extra ) ) !== undefined ) {
+
+				return ret;
+			}
+
+			// Otherwise just get the value from the style object
+			return style[ name ];
+		}
+	},
+
+	css: function( elem, name, extra, styles ) {
+		var val, num, hooks,
+			origName = jQuery.camelCase( name );
+
+		// Make sure that we're working with the right name
+		name = jQuery.cssProps[ origName ] ||
+			( jQuery.cssProps[ origName ] = vendorPropName( origName ) || origName );
+
+		// Try prefixed name followed by the unprefixed name
+		hooks = jQuery.cssHooks[ name ] || jQuery.cssHooks[ origName ];
+
+		// If a hook was provided get the computed value from there
+		if ( hooks && "get" in hooks ) {
+			val = hooks.get( elem, true, extra );
+		}
+
+		// Otherwise, if a way to get the computed value exists, use that
+		if ( val === undefined ) {
+			val = curCSS( elem, name, styles );
+		}
+
+		// Convert "normal" to computed value
+		if ( val === "normal" && name in cssNormalTransform ) {
+			val = cssNormalTransform[ name ];
+		}
+
+		// Make numeric if forced or a qualifier was provided and val looks numeric
+		if ( extra === "" || extra ) {
+			num = parseFloat( val );
+			return extra === true || isFinite( num ) ? num || 0 : val;
+		}
+		return val;
+	}
+} );
+
+jQuery.each( [ "height", "width" ], function( i, name ) {
+	jQuery.cssHooks[ name ] = {
+		get: function( elem, computed, extra ) {
+			if ( computed ) {
+
+				// Certain elements can have dimension info if we invisibly show them
+				// but it must have a current display style that would benefit
+				return rdisplayswap.test( jQuery.css( elem, "display" ) ) &&
+
+					// Support: Safari 8+
+					// Table columns in Safari have non-zero offsetWidth & zero
+					// getBoundingClientRect().width unless display is changed.
+					// Support: IE <=11 only
+					// Running getBoundingClientRect on a disconnected node
+					// in IE throws an error.
+					( !elem.getClientRects().length || !elem.getBoundingClientRect().width ) ?
+						swap( elem, cssShow, function() {
+							return getWidthOrHeight( elem, name, extra );
+						} ) :
+						getWidthOrHeight( elem, name, extra );
+			}
+		},
+
+		set: function( elem, value, extra ) {
+			var matches,
+				styles = extra && getStyles( elem ),
+				subtract = extra && augmentWidthOrHeight(
+					elem,
+					name,
+					extra,
+					jQuery.css( elem, "boxSizing", false, styles ) === "border-box",
+					styles
+				);
+
+			// Convert to pixels if value adjustment is needed
+			if ( subtract && ( matches = rcssNum.exec( value ) ) &&
+				( matches[ 3 ] || "px" ) !== "px" ) {
+
+				elem.style[ name ] = value;
+				value = jQuery.css( elem, name );
+			}
+
+			return setPositiveNumber( elem, value, subtract );
+		}
+	};
+} );
+
+jQuery.cssHooks.marginLeft = addGetHookIf( support.reliableMarginLeft,
+	function( elem, computed ) {
+		if ( computed ) {
+			return ( parseFloat( curCSS( elem, "marginLeft" ) ) ||
+				elem.getBoundingClientRect().left -
+					swap( elem, { marginLeft: 0 }, function() {
+						return elem.getBoundingClientRect().left;
+					} )
+				) + "px";
+		}
+	}
+);
+
+// These hooks are used by animate to expand properties
+jQuery.each( {
+	margin: "",
+	padding: "",
+	border: "Width"
+}, function( prefix, suffix ) {
+	jQuery.cssHooks[ prefix + suffix ] = {
+		expand: function( value ) {
+			var i = 0,
+				expanded = {},
+
+				// Assumes a single number if not a string
+				parts = typeof value === "string" ? value.split( " " ) : [ value ];
+
+			for ( ; i < 4; i++ ) {
+				expanded[ prefix + cssExpand[ i ] + suffix ] =
+					parts[ i ] || parts[ i - 2 ] || parts[ 0 ];
+			}
+
+			return expanded;
+		}
+	};
+
+	if ( !rmargin.test( prefix ) ) {
+		jQuery.cssHooks[ prefix + suffix ].set = setPositiveNumber;
+	}
+} );
+
+jQuery.fn.extend( {
+	css: function( name, value ) {
+		return access( this, function( elem, name, value ) {
+			var styles, len,
+				map = {},
+				i = 0;
+
+			if ( jQuery.isArray( name ) ) {
+				styles = getStyles( elem );
+				len = name.length;
+
+				for ( ; i < len; i++ ) {
+					map[ name[ i ] ] = jQuery.css( elem, name[ i ], false, styles );
+				}
+
+				return map;
+			}
+
+			return value !== undefined ?
+				jQuery.style( elem, name, value ) :
+				jQuery.css( elem, name );
+		}, name, value, arguments.length > 1 );
+	}
+} );
+
+
+function Tween( elem, options, prop, end, easing ) {
+	return new Tween.prototype.init( elem, options, prop, end, easing );
+}
+jQuery.Tween = Tween;
+
+Tween.prototype = {
+	constructor: Tween,
+	init: function( elem, options, prop, end, easing, unit ) {
+		this.elem = elem;
+		this.prop = prop;
+		this.easing = easing || jQuery.easing._default;
+		this.options = options;
+		this.start = this.now = this.cur();
+		this.end = end;
+		this.unit = unit || ( jQuery.cssNumber[ prop ] ? "" : "px" );
+	},
+	cur: function() {
+		var hooks = Tween.propHooks[ this.prop ];
+
+		return hooks && hooks.get ?
+			hooks.get( this ) :
+			Tween.propHooks._default.get( this );
+	},
+	run: function( percent ) {
+		var eased,
+			hooks = Tween.propHooks[ this.prop ];
+
+		if ( this.options.duration ) {
+			this.pos = eased = jQuery.easing[ this.easing ](
+				percent, this.options.duration * percent, 0, 1, this.options.duration
+			);
+		} else {
+			this.pos = eased = percent;
+		}
+		this.now = ( this.end - this.start ) * eased + this.start;
+
+		if ( this.options.step ) {
+			this.options.step.call( this.elem, this.now, this );
+		}
+
+		if ( hooks && hooks.set ) {
+			hooks.set( this );
+		} else {
+			Tween.propHooks._default.set( this );
+		}
+		return this;
+	}
+};
+
+Tween.prototype.init.prototype = Tween.prototype;
+
+Tween.propHooks = {
+	_default: {
+		get: function( tween ) {
+			var result;
+
+			// Use a property on the element directly when it is not a DOM element,
+			// or when there is no matching style property that exists.
+			if ( tween.elem.nodeType !== 1 ||
+				tween.elem[ tween.prop ] != null && tween.elem.style[ tween.prop ] == null ) {
+				return tween.elem[ tween.prop ];
+			}
+
+			// Passing an empty string as a 3rd parameter to .css will automatically
+			// attempt a parseFloat and fallback to a string if the parse fails.
+			// Simple values such as "10px" are parsed to Float;
+			// complex values such as "rotate(1rad)" are returned as-is.
+			result = jQuery.css( tween.elem, tween.prop, "" );
+
+			// Empty strings, null, undefined and "auto" are converted to 0.
+			return !result || result === "auto" ? 0 : result;
+		},
+		set: function( tween ) {
+
+			// Use step hook for back compat.
+			// Use cssHook if its there.
+			// Use .style if available and use plain properties where available.
+			if ( jQuery.fx.step[ tween.prop ] ) {
+				jQuery.fx.step[ tween.prop ]( tween );
+			} else if ( tween.elem.nodeType === 1 &&
+				( tween.elem.style[ jQuery.cssProps[ tween.prop ] ] != null ||
+					jQuery.cssHooks[ tween.prop ] ) ) {
+				jQuery.style( tween.elem, tween.prop, tween.now + tween.unit );
+			} else {
+				tween.elem[ tween.prop ] = tween.now;
+			}
+		}
+	}
+};
+
+// Support: IE <=9 only
+// Panic based approach to setting things on disconnected nodes
+Tween.propHooks.scrollTop = Tween.propHooks.scrollLeft = {
+	set: function( tween ) {
+		if ( tween.elem.nodeType && tween.elem.parentNode ) {
+			tween.elem[ tween.prop ] = tween.now;
+		}
+	}
+};
+
+jQuery.easing = {
+	linear: function( p ) {
+		return p;
+	},
+	swing: function( p ) {
+		return 0.5 - Math.cos( p * Math.PI ) / 2;
+	},
+	_default: "swing"
+};
+
+jQuery.fx = Tween.prototype.init;
+
+// Back compat <1.8 extension point
+jQuery.fx.step = {};
+
+
+
+
+var
+	fxNow, timerId,
+	rfxtypes = /^(?:toggle|show|hide)$/,
+	rrun = /queueHooks$/;
+
+function raf() {
+	if ( timerId ) {
+		window.requestAnimationFrame( raf );
+		jQuery.fx.tick();
+	}
+}
+
+// Animations created synchronously will run synchronously
+function createFxNow() {
+	window.setTimeout( function() {
+		fxNow = undefined;
+	} );
+	return ( fxNow = jQuery.now() );
+}
+
+// Generate parameters to create a standard animation
+function genFx( type, includeWidth ) {
+	var which,
+		i = 0,
+		attrs = { height: type };
+
+	// If we include width, step value is 1 to do all cssExpand values,
+	// otherwise step value is 2 to skip over Left and Right
+	includeWidth = includeWidth ? 1 : 0;
+	for ( ; i < 4; i += 2 - includeWidth ) {
+		which = cssExpand[ i ];
+		attrs[ "margin" + which ] = attrs[ "padding" + which ] = type;
+	}
+
+	if ( includeWidth ) {
+		attrs.opacity = attrs.width = type;
+	}
+
+	return attrs;
+}
+
+function createTween( value, prop, animation ) {
+	var tween,
+		collection = ( Animation.tweeners[ prop ] || [] ).concat( Animation.tweeners[ "*" ] ),
+		index = 0,
+		length = collection.length;
+	for ( ; index < length; index++ ) {
+		if ( ( tween = collection[ index ].call( animation, prop, value ) ) ) {
+
+			// We're done with this property
+			return tween;
+		}
+	}
+}
+
+function defaultPrefilter( elem, props, opts ) {
+	var prop, value, toggle, hooks, oldfire, propTween, restoreDisplay, display,
+		isBox = "width" in props || "height" in props,
+		anim = this,
+		orig = {},
+		style = elem.style,
+		hidden = elem.nodeType && isHiddenWithinTree( elem ),
+		dataShow = dataPriv.get( elem, "fxshow" );
+
+	// Queue-skipping animations hijack the fx hooks
+	if ( !opts.queue ) {
+		hooks = jQuery._queueHooks( elem, "fx" );
+		if ( hooks.unqueued == null ) {
+			hooks.unqueued = 0;
+			oldfire = hooks.empty.fire;
+			hooks.empty.fire = function() {
+				if ( !hooks.unqueued ) {
+					oldfire();
+				}
+			};
+		}
+		hooks.unqueued++;
+
+		anim.always( function() {
+
+			// Ensure the complete handler is called before this completes
+			anim.always( function() {
+				hooks.unqueued--;
+				if ( !jQuery.queue( elem, "fx" ).length ) {
+					hooks.empty.fire();
+				}
+			} );
+		} );
+	}
+
+	// Detect show/hide animations
+	for ( prop in props ) {
+		value = props[ prop ];
+		if ( rfxtypes.test( value ) ) {
+			delete props[ prop ];
+			toggle = toggle || value === "toggle";
+			if ( value === ( hidden ? "hide" : "show" ) ) {
+
+				// Pretend to be hidden if this is a "show" and
+				// there is still data from a stopped show/hide
+				if ( value === "show" && dataShow && dataShow[ prop ] !== undefined ) {
+					hidden = true;
+
+				// Ignore all other no-op show/hide data
+				} else {
+					continue;
+				}
+			}
+			orig[ prop ] = dataShow && dataShow[ prop ] || jQuery.style( elem, prop );
+		}
+	}
+
+	// Bail out if this is a no-op like .hide().hide()
+	propTween = !jQuery.isEmptyObject( props );
+	if ( !propTween && jQuery.isEmptyObject( orig ) ) {
+		return;
+	}
+
+	// Restrict "overflow" and "display" styles during box animations
+	if ( isBox && elem.nodeType === 1 ) {
+
+		// Support: IE <=9 - 11, Edge 12 - 13
+		// Record all 3 overflow attributes because IE does not infer the shorthand
+		// from identically-valued overflowX and overflowY
+		opts.overflow = [ style.overflow, style.overflowX, style.overflowY ];
+
+		// Identify a display type, preferring old show/hide data over the CSS cascade
+		restoreDisplay = dataShow && dataShow.display;
+		if ( restoreDisplay == null ) {
+			restoreDisplay = dataPriv.get( elem, "display" );
+		}
+		display = jQuery.css( elem, "display" );
+		if ( display === "none" ) {
+			if ( restoreDisplay ) {
+				display = restoreDisplay;
+			} else {
+
+				// Get nonempty value(s) by temporarily forcing visibility
+				showHide( [ elem ], true );
+				restoreDisplay = elem.style.display || restoreDisplay;
+				display = jQuery.css( elem, "display" );
+				showHide( [ elem ] );
+			}
+		}
+
+		// Animate inline elements as inline-block
+		if ( display === "inline" || display === "inline-block" && restoreDisplay != null ) {
+			if ( jQuery.css( elem, "float" ) === "none" ) {
+
+				// Restore the original display value at the end of pure show/hide animations
+				if ( !propTween ) {
+					anim.done( function() {
+						style.display = restoreDisplay;
+					} );
+					if ( restoreDisplay == null ) {
+						display = style.display;
+						restoreDisplay = display === "none" ? "" : display;
+					}
+				}
+				style.display = "inline-block";
+			}
+		}
+	}
+
+	if ( opts.overflow ) {
+		style.overflow = "hidden";
+		anim.always( function() {
+			style.overflow = opts.overflow[ 0 ];
+			style.overflowX = opts.overflow[ 1 ];
+			style.overflowY = opts.overflow[ 2 ];
+		} );
+	}
+
+	// Implement show/hide animations
+	propTween = false;
+	for ( prop in orig ) {
+
+		// General show/hide setup for this element animation
+		if ( !propTween ) {
+			if ( dataShow ) {
+				if ( "hidden" in dataShow ) {
+					hidden = dataShow.hidden;
+				}
+			} else {
+				dataShow = dataPriv.access( elem, "fxshow", { display: restoreDisplay } );
+			}
+
+			// Store hidden/visible for toggle so `.stop().toggle()` "reverses"
+			if ( toggle ) {
+				dataShow.hidden = !hidden;
+			}
+
+			// Show elements before animating them
+			if ( hidden ) {
+				showHide( [ elem ], true );
+			}
+
+			/* eslint-disable no-loop-func */
+
+			anim.done( function() {
+
+			/* eslint-enable no-loop-func */
+
+				// The final step of a "hide" animation is actually hiding the element
+				if ( !hidden ) {
+					showHide( [ elem ] );
+				}
+				dataPriv.remove( elem, "fxshow" );
+				for ( prop in orig ) {
+					jQuery.style( elem, prop, orig[ prop ] );
+				}
+			} );
+		}
+
+		// Per-property setup
+		propTween = createTween( hidden ? dataShow[ prop ] : 0, prop, anim );
+		if ( !( prop in dataShow ) ) {
+			dataShow[ prop ] = propTween.start;
+			if ( hidden ) {
+				propTween.end = propTween.start;
+				propTween.start = 0;
+			}
+		}
+	}
+}
+
+function propFilter( props, specialEasing ) {
+	var index, name, easing, value, hooks;
+
+	// camelCase, specialEasing and expand cssHook pass
+	for ( index in props ) {
+		name = jQuery.camelCase( index );
+		easing = specialEasing[ name ];
+		value = props[ index ];
+		if ( jQuery.isArray( value ) ) {
+			easing = value[ 1 ];
+			value = props[ index ] = value[ 0 ];
+		}
+
+		if ( index !== name ) {
+			props[ name ] = value;
+			delete props[ index ];
+		}
+
+		hooks = jQuery.cssHooks[ name ];
+		if ( hooks && "expand" in hooks ) {
+			value = hooks.expand( value );
+			delete props[ name ];
+
+			// Not quite $.extend, this won't overwrite existing keys.
+			// Reusing 'index' because we have the correct "name"
+			for ( index in value ) {
+				if ( !( index in props ) ) {
+					props[ index ] = value[ index ];
+					specialEasing[ index ] = easing;
+				}
+			}
+		} else {
+			specialEasing[ name ] = easing;
+		}
+	}
+}
+
+function Animation( elem, properties, options ) {
+	var result,
+		stopped,
+		index = 0,
+		length = Animation.prefilters.length,
+		deferred = jQuery.Deferred().always( function() {
+
+			// Don't match elem in the :animated selector
+			delete tick.elem;
+		} ),
+		tick = function() {
+			if ( stopped ) {
+				return false;
+			}
+			var currentTime = fxNow || createFxNow(),
+				remaining = Math.max( 0, animation.startTime + animation.duration - currentTime ),
+
+				// Support: Android 2.3 only
+				// Archaic crash bug won't allow us to use `1 - ( 0.5 || 0 )` (#12497)
+				temp = remaining / animation.duration || 0,
+				percent = 1 - temp,
+				index = 0,
+				length = animation.tweens.length;
+
+			for ( ; index < length; index++ ) {
+				animation.tweens[ index ].run( percent );
+			}
+
+			deferred.notifyWith( elem, [ animation, percent, remaining ] );
+
+			if ( percent < 1 && length ) {
+				return remaining;
+			} else {
+				deferred.resolveWith( elem, [ animation ] );
+				return false;
+			}
+		},
+		animation = deferred.promise( {
+			elem: elem,
+			props: jQuery.extend( {}, properties ),
+			opts: jQuery.extend( true, {
+				specialEasing: {},
+				easing: jQuery.easing._default
+			}, options ),
+			originalProperties: properties,
+			originalOptions: options,
+			startTime: fxNow || createFxNow(),
+			duration: options.duration,
+			tweens: [],
+			createTween: function( prop, end ) {
+				var tween = jQuery.Tween( elem, animation.opts, prop, end,
+						animation.opts.specialEasing[ prop ] || animation.opts.easing );
+				animation.tweens.push( tween );
+				return tween;
+			},
+			stop: function( gotoEnd ) {
+				var index = 0,
+
+					// If we are going to the end, we want to run all the tweens
+					// otherwise we skip this part
+					length = gotoEnd ? animation.tweens.length : 0;
+				if ( stopped ) {
+					return this;
+				}
+				stopped = true;
+				for ( ; index < length; index++ ) {
+					animation.tweens[ index ].run( 1 );
+				}
+
+				// Resolve when we played the last frame; otherwise, reject
+				if ( gotoEnd ) {
+					deferred.notifyWith( elem, [ animation, 1, 0 ] );
+					deferred.resolveWith( elem, [ animation, gotoEnd ] );
+				} else {
+					deferred.rejectWith( elem, [ animation, gotoEnd ] );
+				}
+				return this;
+			}
+		} ),
+		props = animation.props;
+
+	propFilter( props, animation.opts.specialEasing );
+
+	for ( ; index < length; index++ ) {
+		result = Animation.prefilters[ index ].call( animation, elem, props, animation.opts );
+		if ( result ) {
+			if ( jQuery.isFunction( result.stop ) ) {
+				jQuery._queueHooks( animation.elem, animation.opts.queue ).stop =
+					jQuery.proxy( result.stop, result );
+			}
+			return result;
+		}
+	}
+
+	jQuery.map( props, createTween, animation );
+
+	if ( jQuery.isFunction( animation.opts.start ) ) {
+		animation.opts.start.call( elem, animation );
+	}
+
+	jQuery.fx.timer(
+		jQuery.extend( tick, {
+			elem: elem,
+			anim: animation,
+			queue: animation.opts.queue
+		} )
+	);
+
+	// attach callbacks from options
+	return animation.progress( animation.opts.progress )
+		.done( animation.opts.done, animation.opts.complete )
+		.fail( animation.opts.fail )
+		.always( animation.opts.always );
+}
+
+jQuery.Animation = jQuery.extend( Animation, {
+
+	tweeners: {
+		"*": [ function( prop, value ) {
+			var tween = this.createTween( prop, value );
+			adjustCSS( tween.elem, prop, rcssNum.exec( value ), tween );
+			return tween;
+		} ]
+	},
+
+	tweener: function( props, callback ) {
+		if ( jQuery.isFunction( props ) ) {
+			callback = props;
+			props = [ "*" ];
+		} else {
+			props = props.match( rnotwhite );
+		}
+
+		var prop,
+			index = 0,
+			length = props.length;
+
+		for ( ; index < length; index++ ) {
+			prop = props[ index ];
+			Animation.tweeners[ prop ] = Animation.tweeners[ prop ] || [];
+			Animation.tweeners[ prop ].unshift( callback );
+		}
+	},
+
+	prefilters: [ defaultPrefilter ],
+
+	prefilter: function( callback, prepend ) {
+		if ( prepend ) {
+			Animation.prefilters.unshift( callback );
+		} else {
+			Animation.prefilters.push( callback );
+		}
+	}
+} );
+
+jQuery.speed = function( speed, easing, fn ) {
+	var opt = speed && typeof speed === "object" ? jQuery.extend( {}, speed ) : {
+		complete: fn || !fn && easing ||
+			jQuery.isFunction( speed ) && speed,
+		duration: speed,
+		easing: fn && easing || easing && !jQuery.isFunction( easing ) && easing
+	};
+
+	// Go to the end state if fx are off or if document is hidden
+	if ( jQuery.fx.off || document.hidden ) {
+		opt.duration = 0;
+
+	} else {
+		opt.duration = typeof opt.duration === "number" ?
+			opt.duration : opt.duration in jQuery.fx.speeds ?
+				jQuery.fx.speeds[ opt.duration ] : jQuery.fx.speeds._default;
+	}
+
+	// Normalize opt.queue - true/undefined/null -> "fx"
+	if ( opt.queue == null || opt.queue === true ) {
+		opt.queue = "fx";
+	}
+
+	// Queueing
+	opt.old = opt.complete;
+
+	opt.complete = function() {
+		if ( jQuery.isFunction( opt.old ) ) {
+			opt.old.call( this );
+		}
+
+		if ( opt.queue ) {
+			jQuery.dequeue( this, opt.queue );
+		}
+	};
+
+	return opt;
+};
+
+jQuery.fn.extend( {
+	fadeTo: function( speed, to, easing, callback ) {
+
+		// Show any hidden elements after setting opacity to 0
+		return this.filter( isHiddenWithinTree ).css( "opacity", 0 ).show()
+
+			// Animate to the value specified
+			.end().animate( { opacity: to }, speed, easing, callback );
+	},
+	animate: function( prop, speed, easing, callback ) {
+		var empty = jQuery.isEmptyObject( prop ),
+			optall = jQuery.speed( speed, easing, callback ),
+			doAnimation = function() {
+
+				// Operate on a copy of prop so per-property easing won't be lost
+				var anim = Animation( this, jQuery.extend( {}, prop ), optall );
+
+				// Empty animations, or finishing resolves immediately
+				if ( empty || dataPriv.get( this, "finish" ) ) {
+					anim.stop( true );
+				}
+			};
+			doAnimation.finish = doAnimation;
+
+		return empty || optall.queue === false ?
+			this.each( doAnimation ) :
+			this.queue( optall.queue, doAnimation );
+	},
+	stop: function( type, clearQueue, gotoEnd ) {
+		var stopQueue = function( hooks ) {
+			var stop = hooks.stop;
+			delete hooks.stop;
+			stop( gotoEnd );
+		};
+
+		if ( typeof type !== "string" ) {
+			gotoEnd = clearQueue;
+			clearQueue = type;
+			type = undefined;
+		}
+		if ( clearQueue && type !== false ) {
+			this.queue( type || "fx", [] );
+		}
+
+		return this.each( function() {
+			var dequeue = true,
+				index = type != null && type + "queueHooks",
+				timers = jQuery.timers,
+				data = dataPriv.get( this );
+
+			if ( index ) {
+				if ( data[ index ] && data[ index ].stop ) {
+					stopQueue( data[ index ] );
+				}
+			} else {
+				for ( index in data ) {
+					if ( data[ index ] && data[ index ].stop && rrun.test( index ) ) {
+						stopQueue( data[ index ] );
+					}
+				}
+			}
+
+			for ( index = timers.length; index--; ) {
+				if ( timers[ index ].elem === this &&
+					( type == null || timers[ index ].queue === type ) ) {
+
+					timers[ index ].anim.stop( gotoEnd );
+					dequeue = false;
+					timers.splice( index, 1 );
+				}
+			}
+
+			// Start the next in the queue if the last step wasn't forced.
+			// Timers currently will call their complete callbacks, which
+			// will dequeue but only if they were gotoEnd.
+			if ( dequeue || !gotoEnd ) {
+				jQuery.dequeue( this, type );
+			}
+		} );
+	},
+	finish: function( type ) {
+		if ( type !== false ) {
+			type = type || "fx";
+		}
+		return this.each( function() {
+			var index,
+				data = dataPriv.get( this ),
+				queue = data[ type + "queue" ],
+				hooks = data[ type + "queueHooks" ],
+				timers = jQuery.timers,
+				length = queue ? queue.length : 0;
+
+			// Enable finishing flag on private data
+			data.finish = true;
+
+			// Empty the queue first
+			jQuery.queue( this, type, [] );
+
+			if ( hooks && hooks.stop ) {
+				hooks.stop.call( this, true );
+			}
+
+			// Look for any active animations, and finish them
+			for ( index = timers.length; index--; ) {
+				if ( timers[ index ].elem === this && timers[ index ].queue === type ) {
+					timers[ index ].anim.stop( true );
+					timers.splice( index, 1 );
+				}
+			}
+
+			// Look for any animations in the old queue and finish them
+			for ( index = 0; index < length; index++ ) {
+				if ( queue[ index ] && queue[ index ].finish ) {
+					queue[ index ].finish.call( this );
+				}
+			}
+
+			// Turn off finishing flag
+			delete data.finish;
+		} );
+	}
+} );
+
+jQuery.each( [ "toggle", "show", "hide" ], function( i, name ) {
+	var cssFn = jQuery.fn[ name ];
+	jQuery.fn[ name ] = function( speed, easing, callback ) {
+		return speed == null || typeof speed === "boolean" ?
+			cssFn.apply( this, arguments ) :
+			this.animate( genFx( name, true ), speed, easing, callback );
+	};
+} );
+
+// Generate shortcuts for custom animations
+jQuery.each( {
+	slideDown: genFx( "show" ),
+	slideUp: genFx( "hide" ),
+	slideToggle: genFx( "toggle" ),
+	fadeIn: { opacity: "show" },
+	fadeOut: { opacity: "hide" },
+	fadeToggle: { opacity: "toggle" }
+}, function( name, props ) {
+	jQuery.fn[ name ] = function( speed, easing, callback ) {
+		return this.animate( props, speed, easing, callback );
+	};
+} );
+
+jQuery.timers = [];
+jQuery.fx.tick = function() {
+	var timer,
+		i = 0,
+		timers = jQuery.timers;
+
+	fxNow = jQuery.now();
+
+	for ( ; i < timers.length; i++ ) {
+		timer = timers[ i ];
+
+		// Checks the timer has not already been removed
+		if ( !timer() && timers[ i ] === timer ) {
+			timers.splice( i--, 1 );
+		}
+	}
+
+	if ( !timers.length ) {
+		jQuery.fx.stop();
+	}
+	fxNow = undefined;
+};
+
+jQuery.fx.timer = function( timer ) {
+	jQuery.timers.push( timer );
+	if ( timer() ) {
+		jQuery.fx.start();
+	} else {
+		jQuery.timers.pop();
+	}
+};
+
+jQuery.fx.interval = 13;
+jQuery.fx.start = function() {
+	if ( !timerId ) {
+		timerId = window.requestAnimationFrame ?
+			window.requestAnimationFrame( raf ) :
+			window.setInterval( jQuery.fx.tick, jQuery.fx.interval );
+	}
+};
+
+jQuery.fx.stop = function() {
+	if ( window.cancelAnimationFrame ) {
+		window.cancelAnimationFrame( timerId );
+	} else {
+		window.clearInterval( timerId );
+	}
+
+	timerId = null;
+};
+
+jQuery.fx.speeds = {
+	slow: 600,
+	fast: 200,
+
+	// Default speed
+	_default: 400
+};
+
+
+// Based off of the plugin by Clint Helfers, with permission.
+// https://web.archive.org/web/20100324014747/http://blindsignals.com/index.php/2009/07/jquery-delay/
+jQuery.fn.delay = function( time, type ) {
+	time = jQuery.fx ? jQuery.fx.speeds[ time ] || time : time;
+	type = type || "fx";
+
+	return this.queue( type, function( next, hooks ) {
+		var timeout = window.setTimeout( next, time );
+		hooks.stop = function() {
+			window.clearTimeout( timeout );
+		};
+	} );
+};
+
+
+( function() {
+	var input = document.createElement( "input" ),
+		select = document.createElement( "select" ),
+		opt = select.appendChild( document.createElement( "option" ) );
+
+	input.type = "checkbox";
+
+	// Support: Android <=4.3 only
+	// Default value for a checkbox should be "on"
+	support.checkOn = input.value !== "";
+
+	// Support: IE <=11 only
+	// Must access selectedIndex to make default options select
+	support.optSelected = opt.selected;
+
+	// Support: IE <=11 only
+	// An input loses its value after becoming a radio
+	input = document.createElement( "input" );
+	input.value = "t";
+	input.type = "radio";
+	support.radioValue = input.value === "t";
+} )();
+
+
+var boolHook,
+	attrHandle = jQuery.expr.attrHandle;
+
+jQuery.fn.extend( {
+	attr: function( name, value ) {
+		return access( this, jQuery.attr, name, value, arguments.length > 1 );
+	},
+
+	removeAttr: function( name ) {
+		return this.each( function() {
+			jQuery.removeAttr( this, name );
+		} );
+	}
+} );
+
+jQuery.extend( {
+	attr: function( elem, name, value ) {
+		var ret, hooks,
+			nType = elem.nodeType;
+
+		// Don't get/set attributes on text, comment and attribute nodes
+		if ( nType === 3 || nType === 8 || nType === 2 ) {
+			return;
+		}
+
+		// Fallback to prop when attributes are not supported
+		if ( typeof elem.getAttribute === "undefined" ) {
+			return jQuery.prop( elem, name, value );
+		}
+
+		// Attribute hooks are determined by the lowercase version
+		// Grab necessary hook if one is defined
+		if ( nType !== 1 || !jQuery.isXMLDoc( elem ) ) {
+			hooks = jQuery.attrHooks[ name.toLowerCase() ] ||
+				( jQuery.expr.match.bool.test( name ) ? boolHook : undefined );
+		}
+
+		if ( value !== undefined ) {
+			if ( value === null ) {
+				jQuery.removeAttr( elem, name );
+				return;
+			}
+
+			if ( hooks && "set" in hooks &&
+				( ret = hooks.set( elem, value, name ) ) !== undefined ) {
+				return ret;
+			}
+
+			elem.setAttribute( name, value + "" );
+			return value;
+		}
+
+		if ( hooks && "get" in hooks && ( ret = hooks.get( elem, name ) ) !== null ) {
+			return ret;
+		}
+
+		ret = jQuery.find.attr( elem, name );
+
+		// Non-existent attributes return null, we normalize to undefined
+		return ret == null ? undefined : ret;
+	},
+
+	attrHooks: {
+		type: {
+			set: function( elem, value ) {
+				if ( !support.radioValue && value === "radio" &&
+					jQuery.nodeName( elem, "input" ) ) {
+					var val = elem.value;
+					elem.setAttribute( "type", value );
+					if ( val ) {
+						elem.value = val;
+					}
+					return value;
+				}
+			}
+		}
+	},
+
+	removeAttr: function( elem, value ) {
+		var name,
+			i = 0,
+			attrNames = value && value.match( rnotwhite );
+
+		if ( attrNames && elem.nodeType === 1 ) {
+			while ( ( name = attrNames[ i++ ] ) ) {
+				elem.removeAttribute( name );
+			}
+		}
+	}
+} );
+
+// Hooks for boolean attributes
+boolHook = {
+	set: function( elem, value, name ) {
+		if ( value === false ) {
+
+			// Remove boolean attributes when set to false
+			jQuery.removeAttr( elem, name );
+		} else {
+			elem.setAttribute( name, name );
+		}
+		return name;
+	}
+};
+
+jQuery.each( jQuery.expr.match.bool.source.match( /\w+/g ), function( i, name ) {
+	var getter = attrHandle[ name ] || jQuery.find.attr;
+
+	attrHandle[ name ] = function( elem, name, isXML ) {
+		var ret, handle,
+			lowercaseName = name.toLowerCase();
+
+		if ( !isXML ) {
+
+			// Avoid an infinite loop by temporarily removing this function from the getter
+			handle = attrHandle[ lowercaseName ];
+			attrHandle[ lowercaseName ] = ret;
+			ret = getter( elem, name, isXML ) != null ?
+				lowercaseName :
+				null;
+			attrHandle[ lowercaseName ] = handle;
+		}
+		return ret;
+	};
+} );
+
+
+
+
+var rfocusable = /^(?:input|select|textarea|button)$/i,
+	rclickable = /^(?:a|area)$/i;
+
+jQuery.fn.extend( {
+	prop: function( name, value ) {
+		return access( this, jQuery.prop, name, value, arguments.length > 1 );
+	},
+
+	removeProp: function( name ) {
+		return this.each( function() {
+			delete this[ jQuery.propFix[ name ] || name ];
+		} );
+	}
+} );
+
+jQuery.extend( {
+	prop: function( elem, name, value ) {
+		var ret, hooks,
+			nType = elem.nodeType;
+
+		// Don't get/set properties on text, comment and attribute nodes
+		if ( nType === 3 || nType === 8 || nType === 2 ) {
+			return;
+		}
+
+		if ( nType !== 1 || !jQuery.isXMLDoc( elem ) ) {
+
+			// Fix name and attach hooks
+			name = jQuery.propFix[ name ] || name;
+			hooks = jQuery.propHooks[ name ];
+		}
+
+		if ( value !== undefined ) {
+			if ( hooks && "set" in hooks &&
+				( ret = hooks.set( elem, value, name ) ) !== undefined ) {
+				return ret;
+			}
+
+			return ( elem[ name ] = value );
+		}
+
+		if ( hooks && "get" in hooks && ( ret = hooks.get( elem, name ) ) !== null ) {
+			return ret;
+		}
+
+		return elem[ name ];
+	},
+
+	propHooks: {
+		tabIndex: {
+			get: function( elem ) {
+
+				// Support: IE <=9 - 11 only
+				// elem.tabIndex doesn't always return the
+				// correct value when it hasn't been explicitly set
+				// https://web.archive.org/web/20141116233347/http://fluidproject.org/blog/2008/01/09/getting-setting-and-removing-tabindex-values-with-javascript/
+				// Use proper attribute retrieval(#12072)
+				var tabindex = jQuery.find.attr( elem, "tabindex" );
+
+				return tabindex ?
+					parseInt( tabindex, 10 ) :
+					rfocusable.test( elem.nodeName ) ||
+						rclickable.test( elem.nodeName ) && elem.href ?
+							0 :
+							-1;
+			}
+		}
+	},
+
+	propFix: {
+		"for": "htmlFor",
+		"class": "className"
+	}
+} );
+
+// Support: IE <=11 only
+// Accessing the selectedIndex property
+// forces the browser to respect setting selected
+// on the option
+// The getter ensures a default option is selected
+// when in an optgroup
+if ( !support.optSelected ) {
+	jQuery.propHooks.selected = {
+		get: function( elem ) {
+			var parent = elem.parentNode;
+			if ( parent && parent.parentNode ) {
+				parent.parentNode.selectedIndex;
+			}
+			return null;
+		},
+		set: function( elem ) {
+			var parent = elem.parentNode;
+			if ( parent ) {
+				parent.selectedIndex;
+
+				if ( parent.parentNode ) {
+					parent.parentNode.selectedIndex;
+				}
+			}
+		}
+	};
+}
+
+jQuery.each( [
+	"tabIndex",
+	"readOnly",
+	"maxLength",
+	"cellSpacing",
+	"cellPadding",
+	"rowSpan",
+	"colSpan",
+	"useMap",
+	"frameBorder",
+	"contentEditable"
+], function() {
+	jQuery.propFix[ this.toLowerCase() ] = this;
+} );
+
+
+
+
+var rclass = /[\t\r\n\f]/g;
+
+function getClass( elem ) {
+	return elem.getAttribute && elem.getAttribute( "class" ) || "";
+}
+
+jQuery.fn.extend( {
+	addClass: function( value ) {
+		var classes, elem, cur, curValue, clazz, j, finalValue,
+			i = 0;
+
+		if ( jQuery.isFunction( value ) ) {
+			return this.each( function( j ) {
+				jQuery( this ).addClass( value.call( this, j, getClass( this ) ) );
+			} );
+		}
+
+		if ( typeof value === "string" && value ) {
+			classes = value.match( rnotwhite ) || [];
+
+			while ( ( elem = this[ i++ ] ) ) {
+				curValue = getClass( elem );
+				cur = elem.nodeType === 1 &&
+					( " " + curValue + " " ).replace( rclass, " " );
+
+				if ( cur ) {
+					j = 0;
+					while ( ( clazz = classes[ j++ ] ) ) {
+						if ( cur.indexOf( " " + clazz + " " ) < 0 ) {
+							cur += clazz + " ";
+						}
+					}
+
+					// Only assign if different to avoid unneeded rendering.
+					finalValue = jQuery.trim( cur );
+					if ( curValue !== finalValue ) {
+						elem.setAttribute( "class", finalValue );
+					}
+				}
+			}
+		}
+
+		return this;
+	},
+
+	removeClass: function( value ) {
+		var classes, elem, cur, curValue, clazz, j, finalValue,
+			i = 0;
+
+		if ( jQuery.isFunction( value ) ) {
+			return this.each( function( j ) {
+				jQuery( this ).removeClass( value.call( this, j, getClass( this ) ) );
+			} );
+		}
+
+		if ( !arguments.length ) {
+			return this.attr( "class", "" );
+		}
+
+		if ( typeof value === "string" && value ) {
+			classes = value.match( rnotwhite ) || [];
+
+			while ( ( elem = this[ i++ ] ) ) {
+				curValue = getClass( elem );
+
+				// This expression is here for better compressibility (see addClass)
+				cur = elem.nodeType === 1 &&
+					( " " + curValue + " " ).replace( rclass, " " );
+
+				if ( cur ) {
+					j = 0;
+					while ( ( clazz = classes[ j++ ] ) ) {
+
+						// Remove *all* instances
+						while ( cur.indexOf( " " + clazz + " " ) > -1 ) {
+							cur = cur.replace( " " + clazz + " ", " " );
+						}
+					}
+
+					// Only assign if different to avoid unneeded rendering.
+					finalValue = jQuery.trim( cur );
+					if ( curValue !== finalValue ) {
+						elem.setAttribute( "class", finalValue );
+					}
+				}
+			}
+		}
+
+		return this;
+	},
+
+	toggleClass: function( value, stateVal ) {
+		var type = typeof value;
+
+		if ( typeof stateVal === "boolean" && type === "string" ) {
+			return stateVal ? this.addClass( value ) : this.removeClass( value );
+		}
+
+		if ( jQuery.isFunction( value ) ) {
+			return this.each( function( i ) {
+				jQuery( this ).toggleClass(
+					value.call( this, i, getClass( this ), stateVal ),
+					stateVal
+				);
+			} );
+		}
+
+		return this.each( function() {
+			var className, i, self, classNames;
+
+			if ( type === "string" ) {
+
+				// Toggle individual class names
+				i = 0;
+				self = jQuery( this );
+				classNames = value.match( rnotwhite ) || [];
+
+				while ( ( className = classNames[ i++ ] ) ) {
+
+					// Check each className given, space separated list
+					if ( self.hasClass( className ) ) {
+						self.removeClass( className );
+					} else {
+						self.addClass( className );
+					}
+				}
+
+			// Toggle whole class name
+			} else if ( value === undefined || type === "boolean" ) {
+				className = getClass( this );
+				if ( className ) {
+
+					// Store className if set
+					dataPriv.set( this, "__className__", className );
+				}
+
+				// If the element has a class name or if we're passed `false`,
+				// then remove the whole classname (if there was one, the above saved it).
+				// Otherwise bring back whatever was previously saved (if anything),
+				// falling back to the empty string if nothing was stored.
+				if ( this.setAttribute ) {
+					this.setAttribute( "class",
+						className || value === false ?
+						"" :
+						dataPriv.get( this, "__className__" ) || ""
+					);
+				}
+			}
+		} );
+	},
+
+	hasClass: function( selector ) {
+		var className, elem,
+			i = 0;
+
+		className = " " + selector + " ";
+		while ( ( elem = this[ i++ ] ) ) {
+			if ( elem.nodeType === 1 &&
+				( " " + getClass( elem ) + " " ).replace( rclass, " " )
+					.indexOf( className ) > -1
+			) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+} );
+
+
+
+
+var rreturn = /\r/g,
+	rspaces = /[\x20\t\r\n\f]+/g;
+
+jQuery.fn.extend( {
+	val: function( value ) {
+		var hooks, ret, isFunction,
+			elem = this[ 0 ];
+
+		if ( !arguments.length ) {
+			if ( elem ) {
+				hooks = jQuery.valHooks[ elem.type ] ||
+					jQuery.valHooks[ elem.nodeName.toLowerCase() ];
+
+				if ( hooks &&
+					"get" in hooks &&
+					( ret = hooks.get( elem, "value" ) ) !== undefined
+				) {
+					return ret;
+				}
+
+				ret = elem.value;
+
+				return typeof ret === "string" ?
+
+					// Handle most common string cases
+					ret.replace( rreturn, "" ) :
+
+					// Handle cases where value is null/undef or number
+					ret == null ? "" : ret;
+			}
+
+			return;
+		}
+
+		isFunction = jQuery.isFunction( value );
+
+		return this.each( function( i ) {
+			var val;
+
+			if ( this.nodeType !== 1 ) {
+				return;
+			}
+
+			if ( isFunction ) {
+				val = value.call( this, i, jQuery( this ).val() );
+			} else {
+				val = value;
+			}
+
+			// Treat null/undefined as ""; convert numbers to string
+			if ( val == null ) {
+				val = "";
+
+			} else if ( typeof val === "number" ) {
+				val += "";
+
+			} else if ( jQuery.isArray( val ) ) {
+				val = jQuery.map( val, function( value ) {
+					return value == null ? "" : value + "";
+				} );
+			}
+
+			hooks = jQuery.valHooks[ this.type ] || jQuery.valHooks[ this.nodeName.toLowerCase() ];
+
+			// If set returns undefined, fall back to normal setting
+			if ( !hooks || !( "set" in hooks ) || hooks.set( this, val, "value" ) === undefined ) {
+				this.value = val;
+			}
+		} );
+	}
+} );
+
+jQuery.extend( {
+	valHooks: {
+		option: {
+			get: function( elem ) {
+
+				var val = jQuery.find.attr( elem, "value" );
+				return val != null ?
+					val :
+
+					// Support: IE <=10 - 11 only
+					// option.text throws exceptions (#14686, #14858)
+					// Strip and collapse whitespace
+					// https://html.spec.whatwg.org/#strip-and-collapse-whitespace
+					jQuery.trim( jQuery.text( elem ) ).replace( rspaces, " " );
+			}
+		},
+		select: {
+			get: function( elem ) {
+				var value, option,
+					options = elem.options,
+					index = elem.selectedIndex,
+					one = elem.type === "select-one",
+					values = one ? null : [],
+					max = one ? index + 1 : options.length,
+					i = index < 0 ?
+						max :
+						one ? index : 0;
+
+				// Loop through all the selected options
+				for ( ; i < max; i++ ) {
+					option = options[ i ];
+
+					// Support: IE <=9 only
+					// IE8-9 doesn't update selected after form reset (#2551)
+					if ( ( option.selected || i === index ) &&
+
+							// Don't return options that are disabled or in a disabled optgroup
+							!option.disabled &&
+							( !option.parentNode.disabled ||
+								!jQuery.nodeName( option.parentNode, "optgroup" ) ) ) {
+
+						// Get the specific value for the option
+						value = jQuery( option ).val();
+
+						// We don't need an array for one selects
+						if ( one ) {
+							return value;
+						}
+
+						// Multi-Selects return an array
+						values.push( value );
+					}
+				}
+
+				return values;
+			},
+
+			set: function( elem, value ) {
+				var optionSet, option,
+					options = elem.options,
+					values = jQuery.makeArray( value ),
+					i = options.length;
+
+				while ( i-- ) {
+					option = options[ i ];
+
+					/* eslint-disable no-cond-assign */
+
+					if ( option.selected =
+						jQuery.inArray( jQuery.valHooks.option.get( option ), values ) > -1
+					) {
+						optionSet = true;
+					}
+
+					/* eslint-enable no-cond-assign */
+				}
+
+				// Force browsers to behave consistently when non-matching value is set
+				if ( !optionSet ) {
+					elem.selectedIndex = -1;
+				}
+				return values;
+			}
+		}
+	}
+} );
+
+// Radios and checkboxes getter/setter
+jQuery.each( [ "radio", "checkbox" ], function() {
+	jQuery.valHooks[ this ] = {
+		set: function( elem, value ) {
+			if ( jQuery.isArray( value ) ) {
+				return ( elem.checked = jQuery.inArray( jQuery( elem ).val(), value ) > -1 );
+			}
+		}
+	};
+	if ( !support.checkOn ) {
+		jQuery.valHooks[ this ].get = function( elem ) {
+			return elem.getAttribute( "value" ) === null ? "on" : elem.value;
+		};
+	}
+} );
+
+
+
+
+// Return jQuery for attributes-only inclusion
+
+
+var rfocusMorph = /^(?:focusinfocus|focusoutblur)$/;
+
+jQuery.extend( jQuery.event, {
+
+	trigger: function( event, data, elem, onlyHandlers ) {
+
+		var i, cur, tmp, bubbleType, ontype, handle, special,
+			eventPath = [ elem || document ],
+			type = hasOwn.call( event, "type" ) ? event.type : event,
+			namespaces = hasOwn.call( event, "namespace" ) ? event.namespace.split( "." ) : [];
+
+		cur = tmp = elem = elem || document;
+
+		// Don't do events on text and comment nodes
+		if ( elem.nodeType === 3 || elem.nodeType === 8 ) {
+			return;
+		}
+
+		// focus/blur morphs to focusin/out; ensure we're not firing them right now
+		if ( rfocusMorph.test( type + jQuery.event.triggered ) ) {
+			return;
+		}
+
+		if ( type.indexOf( "." ) > -1 ) {
+
+			// Namespaced trigger; create a regexp to match event type in handle()
+			namespaces = type.split( "." );
+			type = namespaces.shift();
+			namespaces.sort();
+		}
+		ontype = type.indexOf( ":" ) < 0 && "on" + type;
+
+		// Caller can pass in a jQuery.Event object, Object, or just an event type string
+		event = event[ jQuery.expando ] ?
+			event :
+			new jQuery.Event( type, typeof event === "object" && event );
+
+		// Trigger bitmask: & 1 for native handlers; & 2 for jQuery (always true)
+		event.isTrigger = onlyHandlers ? 2 : 3;
+		event.namespace = namespaces.join( "." );
+		event.rnamespace = event.namespace ?
+			new RegExp( "(^|\\.)" + namespaces.join( "\\.(?:.*\\.|)" ) + "(\\.|$)" ) :
+			null;
+
+		// Clean up the event in case it is being reused
+		event.result = undefined;
+		if ( !event.target ) {
+			event.target = elem;
+		}
+
+		// Clone any incoming data and prepend the event, creating the handler arg list
+		data = data == null ?
+			[ event ] :
+			jQuery.makeArray( data, [ event ] );
+
+		// Allow special events to draw outside the lines
+		special = jQuery.event.special[ type ] || {};
+		if ( !onlyHandlers && special.trigger && special.trigger.apply( elem, data ) === false ) {
+			return;
+		}
+
+		// Determine event propagation path in advance, per W3C events spec (#9951)
+		// Bubble up to document, then to window; watch for a global ownerDocument var (#9724)
+		if ( !onlyHandlers && !special.noBubble && !jQuery.isWindow( elem ) ) {
+
+			bubbleType = special.delegateType || type;
+			if ( !rfocusMorph.test( bubbleType + type ) ) {
+				cur = cur.parentNode;
+			}
+			for ( ; cur; cur = cur.parentNode ) {
+				eventPath.push( cur );
+				tmp = cur;
+			}
+
+			// Only add window if we got to document (e.g., not plain obj or detached DOM)
+			if ( tmp === ( elem.ownerDocument || document ) ) {
+				eventPath.push( tmp.defaultView || tmp.parentWindow || window );
+			}
+		}
+
+		// Fire handlers on the event path
+		i = 0;
+		while ( ( cur = eventPath[ i++ ] ) && !event.isPropagationStopped() ) {
+
+			event.type = i > 1 ?
+				bubbleType :
+				special.bindType || type;
+
+			// jQuery handler
+			handle = ( dataPriv.get( cur, "events" ) || {} )[ event.type ] &&
+				dataPriv.get( cur, "handle" );
+			if ( handle ) {
+				handle.apply( cur, data );
+			}
+
+			// Native handler
+			handle = ontype && cur[ ontype ];
+			if ( handle && handle.apply && acceptData( cur ) ) {
+				event.result = handle.apply( cur, data );
+				if ( event.result === false ) {
+					event.preventDefault();
+				}
+			}
+		}
+		event.type = type;
+
+		// If nobody prevented the default action, do it now
+		if ( !onlyHandlers && !event.isDefaultPrevented() ) {
+
+			if ( ( !special._default ||
+				special._default.apply( eventPath.pop(), data ) === false ) &&
+				acceptData( elem ) ) {
+
+				// Call a native DOM method on the target with the same name as the event.
+				// Don't do default actions on window, that's where global variables be (#6170)
+				if ( ontype && jQuery.isFunction( elem[ type ] ) && !jQuery.isWindow( elem ) ) {
+
+					// Don't re-trigger an onFOO event when we call its FOO() method
+					tmp = elem[ ontype ];
+
+					if ( tmp ) {
+						elem[ ontype ] = null;
+					}
+
+					// Prevent re-triggering of the same event, since we already bubbled it above
+					jQuery.event.triggered = type;
+					elem[ type ]();
+					jQuery.event.triggered = undefined;
+
+					if ( tmp ) {
+						elem[ ontype ] = tmp;
+					}
+				}
+			}
+		}
+
+		return event.result;
+	},
+
+	// Piggyback on a donor event to simulate a different one
+	// Used only for `focus(in | out)` events
+	simulate: function( type, elem, event ) {
+		var e = jQuery.extend(
+			new jQuery.Event(),
+			event,
+			{
+				type: type,
+				isSimulated: true
+			}
+		);
+
+		jQuery.event.trigger( e, null, elem );
+	}
+
+} );
+
+jQuery.fn.extend( {
+
+	trigger: function( type, data ) {
+		return this.each( function() {
+			jQuery.event.trigger( type, data, this );
+		} );
+	},
+	triggerHandler: function( type, data ) {
+		var elem = this[ 0 ];
+		if ( elem ) {
+			return jQuery.event.trigger( type, data, elem, true );
+		}
+	}
+} );
+
+
+jQuery.each( ( "blur focus focusin focusout resize scroll click dblclick " +
+	"mousedown mouseup mousemove mouseover mouseout mouseenter mouseleave " +
+	"change select submit keydown keypress keyup contextmenu" ).split( " " ),
+	function( i, name ) {
+
+	// Handle event binding
+	jQuery.fn[ name ] = function( data, fn ) {
+		return arguments.length > 0 ?
+			this.on( name, null, data, fn ) :
+			this.trigger( name );
+	};
+} );
+
+jQuery.fn.extend( {
+	hover: function( fnOver, fnOut ) {
+		return this.mouseenter( fnOver ).mouseleave( fnOut || fnOver );
+	}
+} );
+
+
+
+
+support.focusin = "onfocusin" in window;
+
+
+// Support: Firefox <=44
+// Firefox doesn't have focus(in | out) events
+// Related ticket - https://bugzilla.mozilla.org/show_bug.cgi?id=687787
+//
+// Support: Chrome <=48 - 49, Safari <=9.0 - 9.1
+// focus(in | out) events fire after focus & blur events,
+// which is spec violation - http://www.w3.org/TR/DOM-Level-3-Events/#events-focusevent-event-order
+// Related ticket - https://bugs.chromium.org/p/chromium/issues/detail?id=449857
+if ( !support.focusin ) {
+	jQuery.each( { focus: "focusin", blur: "focusout" }, function( orig, fix ) {
+
+		// Attach a single capturing handler on the document while someone wants focusin/focusout
+		var handler = function( event ) {
+			jQuery.event.simulate( fix, event.target, jQuery.event.fix( event ) );
+		};
+
+		jQuery.event.special[ fix ] = {
+			setup: function() {
+				var doc = this.ownerDocument || this,
+					attaches = dataPriv.access( doc, fix );
+
+				if ( !attaches ) {
+					doc.addEventListener( orig, handler, true );
+				}
+				dataPriv.access( doc, fix, ( attaches || 0 ) + 1 );
+			},
+			teardown: function() {
+				var doc = this.ownerDocument || this,
+					attaches = dataPriv.access( doc, fix ) - 1;
+
+				if ( !attaches ) {
+					doc.removeEventListener( orig, handler, true );
+					dataPriv.remove( doc, fix );
+
+				} else {
+					dataPriv.access( doc, fix, attaches );
+				}
+			}
+		};
+	} );
+}
+var location = window.location;
+
+var nonce = jQuery.now();
+
+var rquery = ( /\?/ );
+
+
+
+// Cross-browser xml parsing
+jQuery.parseXML = function( data ) {
+	var xml;
+	if ( !data || typeof data !== "string" ) {
+		return null;
+	}
+
+	// Support: IE 9 - 11 only
+	// IE throws on parseFromString with invalid input.
+	try {
+		xml = ( new window.DOMParser() ).parseFromString( data, "text/xml" );
+	} catch ( e ) {
+		xml = undefined;
+	}
+
+	if ( !xml || xml.getElementsByTagName( "parsererror" ).length ) {
+		jQuery.error( "Invalid XML: " + data );
+	}
+	return xml;
+};
+
+
+var
+	rbracket = /\[\]$/,
+	rCRLF = /\r?\n/g,
+	rsubmitterTypes = /^(?:submit|button|image|reset|file)$/i,
+	rsubmittable = /^(?:input|select|textarea|keygen)/i;
+
+function buildParams( prefix, obj, traditional, add ) {
+	var name;
+
+	if ( jQuery.isArray( obj ) ) {
+
+		// Serialize array item.
+		jQuery.each( obj, function( i, v ) {
+			if ( traditional || rbracket.test( prefix ) ) {
+
+				// Treat each array item as a scalar.
+				add( prefix, v );
+
+			} else {
+
+				// Item is non-scalar (array or object), encode its numeric index.
+				buildParams(
+					prefix + "[" + ( typeof v === "object" && v != null ? i : "" ) + "]",
+					v,
+					traditional,
+					add
+				);
+			}
+		} );
+
+	} else if ( !traditional && jQuery.type( obj ) === "object" ) {
+
+		// Serialize object item.
+		for ( name in obj ) {
+			buildParams( prefix + "[" + name + "]", obj[ name ], traditional, add );
+		}
+
+	} else {
+
+		// Serialize scalar item.
+		add( prefix, obj );
+	}
+}
+
+// Serialize an array of form elements or a set of
+// key/values into a query string
+jQuery.param = function( a, traditional ) {
+	var prefix,
+		s = [],
+		add = function( key, valueOrFunction ) {
+
+			// If value is a function, invoke it and use its return value
+			var value = jQuery.isFunction( valueOrFunction ) ?
+				valueOrFunction() :
+				valueOrFunction;
+
+			s[ s.length ] = encodeURIComponent( key ) + "=" +
+				encodeURIComponent( value == null ? "" : value );
+		};
+
+	// If an array was passed in, assume that it is an array of form elements.
+	if ( jQuery.isArray( a ) || ( a.jquery && !jQuery.isPlainObject( a ) ) ) {
+
+		// Serialize the form elements
+		jQuery.each( a, function() {
+			add( this.name, this.value );
+		} );
+
+	} else {
+
+		// If traditional, encode the "old" way (the way 1.3.2 or older
+		// did it), otherwise encode params recursively.
+		for ( prefix in a ) {
+			buildParams( prefix, a[ prefix ], traditional, add );
+		}
+	}
+
+	// Return the resulting serialization
+	return s.join( "&" );
+};
+
+jQuery.fn.extend( {
+	serialize: function() {
+		return jQuery.param( this.serializeArray() );
+	},
+	serializeArray: function() {
+		return this.map( function() {
+
+			// Can add propHook for "elements" to filter or add form elements
+			var elements = jQuery.prop( this, "elements" );
+			return elements ? jQuery.makeArray( elements ) : this;
+		} )
+		.filter( function() {
+			var type = this.type;
+
+			// Use .is( ":disabled" ) so that fieldset[disabled] works
+			return this.name && !jQuery( this ).is( ":disabled" ) &&
+				rsubmittable.test( this.nodeName ) && !rsubmitterTypes.test( type ) &&
+				( this.checked || !rcheckableType.test( type ) );
+		} )
+		.map( function( i, elem ) {
+			var val = jQuery( this ).val();
+
+			return val == null ?
+				null :
+				jQuery.isArray( val ) ?
+					jQuery.map( val, function( val ) {
+						return { name: elem.name, value: val.replace( rCRLF, "\r\n" ) };
+					} ) :
+					{ name: elem.name, value: val.replace( rCRLF, "\r\n" ) };
+		} ).get();
+	}
+} );
+
+
+var
+	r20 = /%20/g,
+	rhash = /#.*$/,
+	rts = /([?&])_=[^&]*/,
+	rheaders = /^(.*?):[ \t]*([^\r\n]*)$/mg,
+
+	// #7653, #8125, #8152: local protocol detection
+	rlocalProtocol = /^(?:about|app|app-storage|.+-extension|file|res|widget):$/,
+	rnoContent = /^(?:GET|HEAD)$/,
+	rprotocol = /^\/\//,
+
+	/* Prefilters
+	 * 1) They are useful to introduce custom dataTypes (see ajax/jsonp.js for an example)
+	 * 2) These are called:
+	 *    - BEFORE asking for a transport
+	 *    - AFTER param serialization (s.data is a string if s.processData is true)
+	 * 3) key is the dataType
+	 * 4) the catchall symbol "*" can be used
+	 * 5) execution will start with transport dataType and THEN continue down to "*" if needed
+	 */
+	prefilters = {},
+
+	/* Transports bindings
+	 * 1) key is the dataType
+	 * 2) the catchall symbol "*" can be used
+	 * 3) selection will start with transport dataType and THEN go to "*" if needed
+	 */
+	transports = {},
+
+	// Avoid comment-prolog char sequence (#10098); must appease lint and evade compression
+	allTypes = "*/".concat( "*" ),
+
+	// Anchor tag for parsing the document origin
+	originAnchor = document.createElement( "a" );
+	originAnchor.href = location.href;
+
+// Base "constructor" for jQuery.ajaxPrefilter and jQuery.ajaxTransport
+function addToPrefiltersOrTransports( structure ) {
+
+	// dataTypeExpression is optional and defaults to "*"
+	return function( dataTypeExpression, func ) {
+
+		if ( typeof dataTypeExpression !== "string" ) {
+			func = dataTypeExpression;
+			dataTypeExpression = "*";
+		}
+
+		var dataType,
+			i = 0,
+			dataTypes = dataTypeExpression.toLowerCase().match( rnotwhite ) || [];
+
+		if ( jQuery.isFunction( func ) ) {
+
+			// For each dataType in the dataTypeExpression
+			while ( ( dataType = dataTypes[ i++ ] ) ) {
+
+				// Prepend if requested
+				if ( dataType[ 0 ] === "+" ) {
+					dataType = dataType.slice( 1 ) || "*";
+					( structure[ dataType ] = structure[ dataType ] || [] ).unshift( func );
+
+				// Otherwise append
+				} else {
+					( structure[ dataType ] = structure[ dataType ] || [] ).push( func );
+				}
+			}
+		}
+	};
+}
+
+// Base inspection function for prefilters and transports
+function inspectPrefiltersOrTransports( structure, options, originalOptions, jqXHR ) {
+
+	var inspected = {},
+		seekingTransport = ( structure === transports );
+
+	function inspect( dataType ) {
+		var selected;
+		inspected[ dataType ] = true;
+		jQuery.each( structure[ dataType ] || [], function( _, prefilterOrFactory ) {
+			var dataTypeOrTransport = prefilterOrFactory( options, originalOptions, jqXHR );
+			if ( typeof dataTypeOrTransport === "string" &&
+				!seekingTransport && !inspected[ dataTypeOrTransport ] ) {
+
+				options.dataTypes.unshift( dataTypeOrTransport );
+				inspect( dataTypeOrTransport );
+				return false;
+			} else if ( seekingTransport ) {
+				return !( selected = dataTypeOrTransport );
+			}
+		} );
+		return selected;
+	}
+
+	return inspect( options.dataTypes[ 0 ] ) || !inspected[ "*" ] && inspect( "*" );
+}
+
+// A special extend for ajax options
+// that takes "flat" options (not to be deep extended)
+// Fixes #9887
+function ajaxExtend( target, src ) {
+	var key, deep,
+		flatOptions = jQuery.ajaxSettings.flatOptions || {};
+
+	for ( key in src ) {
+		if ( src[ key ] !== undefined ) {
+			( flatOptions[ key ] ? target : ( deep || ( deep = {} ) ) )[ key ] = src[ key ];
+		}
+	}
+	if ( deep ) {
+		jQuery.extend( true, target, deep );
+	}
+
+	return target;
+}
+
+/* Handles responses to an ajax request:
+ * - finds the right dataType (mediates between content-type and expected dataType)
+ * - returns the corresponding response
+ */
+function ajaxHandleResponses( s, jqXHR, responses ) {
+
+	var ct, type, finalDataType, firstDataType,
+		contents = s.contents,
+		dataTypes = s.dataTypes;
+
+	// Remove auto dataType and get content-type in the process
+	while ( dataTypes[ 0 ] === "*" ) {
+		dataTypes.shift();
+		if ( ct === undefined ) {
+			ct = s.mimeType || jqXHR.getResponseHeader( "Content-Type" );
+		}
+	}
+
+	// Check if we're dealing with a known content-type
+	if ( ct ) {
+		for ( type in contents ) {
+			if ( contents[ type ] && contents[ type ].test( ct ) ) {
+				dataTypes.unshift( type );
+				break;
+			}
+		}
+	}
+
+	// Check to see if we have a response for the expected dataType
+	if ( dataTypes[ 0 ] in responses ) {
+		finalDataType = dataTypes[ 0 ];
+	} else {
+
+		// Try convertible dataTypes
+		for ( type in responses ) {
+			if ( !dataTypes[ 0 ] || s.converters[ type + " " + dataTypes[ 0 ] ] ) {
+				finalDataType = type;
+				break;
+			}
+			if ( !firstDataType ) {
+				firstDataType = type;
+			}
+		}
+
+		// Or just use first one
+		finalDataType = finalDataType || firstDataType;
+	}
+
+	// If we found a dataType
+	// We add the dataType to the list if needed
+	// and return the corresponding response
+	if ( finalDataType ) {
+		if ( finalDataType !== dataTypes[ 0 ] ) {
+			dataTypes.unshift( finalDataType );
+		}
+		return responses[ finalDataType ];
+	}
+}
+
+/* Chain conversions given the request and the original response
+ * Also sets the responseXXX fields on the jqXHR instance
+ */
+function ajaxConvert( s, response, jqXHR, isSuccess ) {
+	var conv2, current, conv, tmp, prev,
+		converters = {},
+
+		// Work with a copy of dataTypes in case we need to modify it for conversion
+		dataTypes = s.dataTypes.slice();
+
+	// Create converters map with lowercased keys
+	if ( dataTypes[ 1 ] ) {
+		for ( conv in s.converters ) {
+			converters[ conv.toLowerCase() ] = s.converters[ conv ];
+		}
+	}
+
+	current = dataTypes.shift();
+
+	// Convert to each sequential dataType
+	while ( current ) {
+
+		if ( s.responseFields[ current ] ) {
+			jqXHR[ s.responseFields[ current ] ] = response;
+		}
+
+		// Apply the dataFilter if provided
+		if ( !prev && isSuccess && s.dataFilter ) {
+			response = s.dataFilter( response, s.dataType );
+		}
+
+		prev = current;
+		current = dataTypes.shift();
+
+		if ( current ) {
+
+			// There's only work to do if current dataType is non-auto
+			if ( current === "*" ) {
+
+				current = prev;
+
+			// Convert response if prev dataType is non-auto and differs from current
+			} else if ( prev !== "*" && prev !== current ) {
+
+				// Seek a direct converter
+				conv = converters[ prev + " " + current ] || converters[ "* " + current ];
+
+				// If none found, seek a pair
+				if ( !conv ) {
+					for ( conv2 in converters ) {
+
+						// If conv2 outputs current
+						tmp = conv2.split( " " );
+						if ( tmp[ 1 ] === current ) {
+
+							// If prev can be converted to accepted input
+							conv = converters[ prev + " " + tmp[ 0 ] ] ||
+								converters[ "* " + tmp[ 0 ] ];
+							if ( conv ) {
+
+								// Condense equivalence converters
+								if ( conv === true ) {
+									conv = converters[ conv2 ];
+
+								// Otherwise, insert the intermediate dataType
+								} else if ( converters[ conv2 ] !== true ) {
+									current = tmp[ 0 ];
+									dataTypes.unshift( tmp[ 1 ] );
+								}
+								break;
+							}
+						}
+					}
+				}
+
+				// Apply converter (if not an equivalence)
+				if ( conv !== true ) {
+
+					// Unless errors are allowed to bubble, catch and return them
+					if ( conv && s.throws ) {
+						response = conv( response );
+					} else {
+						try {
+							response = conv( response );
+						} catch ( e ) {
+							return {
+								state: "parsererror",
+								error: conv ? e : "No conversion from " + prev + " to " + current
+							};
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return { state: "success", data: response };
+}
+
+jQuery.extend( {
+
+	// Counter for holding the number of active queries
+	active: 0,
+
+	// Last-Modified header cache for next request
+	lastModified: {},
+	etag: {},
+
+	ajaxSettings: {
+		url: location.href,
+		type: "GET",
+		isLocal: rlocalProtocol.test( location.protocol ),
+		global: true,
+		processData: true,
+		async: true,
+		contentType: "application/x-www-form-urlencoded; charset=UTF-8",
+
+		/*
+		timeout: 0,
+		data: null,
+		dataType: null,
+		username: null,
+		password: null,
+		cache: null,
+		throws: false,
+		traditional: false,
+		headers: {},
+		*/
+
+		accepts: {
+			"*": allTypes,
+			text: "text/plain",
+			html: "text/html",
+			xml: "application/xml, text/xml",
+			json: "application/json, text/javascript"
+		},
+
+		contents: {
+			xml: /\bxml\b/,
+			html: /\bhtml/,
+			json: /\bjson\b/
+		},
+
+		responseFields: {
+			xml: "responseXML",
+			text: "responseText",
+			json: "responseJSON"
+		},
+
+		// Data converters
+		// Keys separate source (or catchall "*") and destination types with a single space
+		converters: {
+
+			// Convert anything to text
+			"* text": String,
+
+			// Text to html (true = no transformation)
+			"text html": true,
+
+			// Evaluate text as a json expression
+			"text json": JSON.parse,
+
+			// Parse text as xml
+			"text xml": jQuery.parseXML
+		},
+
+		// For options that shouldn't be deep extended:
+		// you can add your own custom options here if
+		// and when you create one that shouldn't be
+		// deep extended (see ajaxExtend)
+		flatOptions: {
+			url: true,
+			context: true
+		}
+	},
+
+	// Creates a full fledged settings object into target
+	// with both ajaxSettings and settings fields.
+	// If target is omitted, writes into ajaxSettings.
+	ajaxSetup: function( target, settings ) {
+		return settings ?
+
+			// Building a settings object
+			ajaxExtend( ajaxExtend( target, jQuery.ajaxSettings ), settings ) :
+
+			// Extending ajaxSettings
+			ajaxExtend( jQuery.ajaxSettings, target );
+	},
+
+	ajaxPrefilter: addToPrefiltersOrTransports( prefilters ),
+	ajaxTransport: addToPrefiltersOrTransports( transports ),
+
+	// Main method
+	ajax: function( url, options ) {
+
+		// If url is an object, simulate pre-1.5 signature
+		if ( typeof url === "object" ) {
+			options = url;
+			url = undefined;
+		}
+
+		// Force options to be an object
+		options = options || {};
+
+		var transport,
+
+			// URL without anti-cache param
+			cacheURL,
+
+			// Response headers
+			responseHeadersString,
+			responseHeaders,
+
+			// timeout handle
+			timeoutTimer,
+
+			// Url cleanup var
+			urlAnchor,
+
+			// Request state (becomes false upon send and true upon completion)
+			completed,
+
+			// To know if global events are to be dispatched
+			fireGlobals,
+
+			// Loop variable
+			i,
+
+			// uncached part of the url
+			uncached,
+
+			// Create the final options object
+			s = jQuery.ajaxSetup( {}, options ),
+
+			// Callbacks context
+			callbackContext = s.context || s,
+
+			// Context for global events is callbackContext if it is a DOM node or jQuery collection
+			globalEventContext = s.context &&
+				( callbackContext.nodeType || callbackContext.jquery ) ?
+					jQuery( callbackContext ) :
+					jQuery.event,
+
+			// Deferreds
+			deferred = jQuery.Deferred(),
+			completeDeferred = jQuery.Callbacks( "once memory" ),
+
+			// Status-dependent callbacks
+			statusCode = s.statusCode || {},
+
+			// Headers (they are sent all at once)
+			requestHeaders = {},
+			requestHeadersNames = {},
+
+			// Default abort message
+			strAbort = "canceled",
+
+			// Fake xhr
+			jqXHR = {
+				readyState: 0,
+
+				// Builds headers hashtable if needed
+				getResponseHeader: function( key ) {
+					var match;
+					if ( completed ) {
+						if ( !responseHeaders ) {
+							responseHeaders = {};
+							while ( ( match = rheaders.exec( responseHeadersString ) ) ) {
+								responseHeaders[ match[ 1 ].toLowerCase() ] = match[ 2 ];
+							}
+						}
+						match = responseHeaders[ key.toLowerCase() ];
+					}
+					return match == null ? null : match;
+				},
+
+				// Raw string
+				getAllResponseHeaders: function() {
+					return completed ? responseHeadersString : null;
+				},
+
+				// Caches the header
+				setRequestHeader: function( name, value ) {
+					if ( completed == null ) {
+						name = requestHeadersNames[ name.toLowerCase() ] =
+							requestHeadersNames[ name.toLowerCase() ] || name;
+						requestHeaders[ name ] = value;
+					}
+					return this;
+				},
+
+				// Overrides response content-type header
+				overrideMimeType: function( type ) {
+					if ( completed == null ) {
+						s.mimeType = type;
+					}
+					return this;
+				},
+
+				// Status-dependent callbacks
+				statusCode: function( map ) {
+					var code;
+					if ( map ) {
+						if ( completed ) {
+
+							// Execute the appropriate callbacks
+							jqXHR.always( map[ jqXHR.status ] );
+						} else {
+
+							// Lazy-add the new callbacks in a way that preserves old ones
+							for ( code in map ) {
+								statusCode[ code ] = [ statusCode[ code ], map[ code ] ];
+							}
+						}
+					}
+					return this;
+				},
+
+				// Cancel the request
+				abort: function( statusText ) {
+					var finalText = statusText || strAbort;
+					if ( transport ) {
+						transport.abort( finalText );
+					}
+					done( 0, finalText );
+					return this;
+				}
+			};
+
+		// Attach deferreds
+		deferred.promise( jqXHR );
+
+		// Add protocol if not provided (prefilters might expect it)
+		// Handle falsy url in the settings object (#10093: consistency with old signature)
+		// We also use the url parameter if available
+		s.url = ( ( url || s.url || location.href ) + "" )
+			.replace( rprotocol, location.protocol + "//" );
+
+		// Alias method option to type as per ticket #12004
+		s.type = options.method || options.type || s.method || s.type;
+
+		// Extract dataTypes list
+		s.dataTypes = ( s.dataType || "*" ).toLowerCase().match( rnotwhite ) || [ "" ];
+
+		// A cross-domain request is in order when the origin doesn't match the current origin.
+		if ( s.crossDomain == null ) {
+			urlAnchor = document.createElement( "a" );
+
+			// Support: IE <=8 - 11, Edge 12 - 13
+			// IE throws exception on accessing the href property if url is malformed,
+			// e.g. http://example.com:80x/
+			try {
+				urlAnchor.href = s.url;
+
+				// Support: IE <=8 - 11 only
+				// Anchor's host property isn't correctly set when s.url is relative
+				urlAnchor.href = urlAnchor.href;
+				s.crossDomain = originAnchor.protocol + "//" + originAnchor.host !==
+					urlAnchor.protocol + "//" + urlAnchor.host;
+			} catch ( e ) {
+
+				// If there is an error parsing the URL, assume it is crossDomain,
+				// it can be rejected by the transport if it is invalid
+				s.crossDomain = true;
+			}
+		}
+
+		// Convert data if not already a string
+		if ( s.data && s.processData && typeof s.data !== "string" ) {
+			s.data = jQuery.param( s.data, s.traditional );
+		}
+
+		// Apply prefilters
+		inspectPrefiltersOrTransports( prefilters, s, options, jqXHR );
+
+		// If request was aborted inside a prefilter, stop there
+		if ( completed ) {
+			return jqXHR;
+		}
+
+		// We can fire global events as of now if asked to
+		// Don't fire events if jQuery.event is undefined in an AMD-usage scenario (#15118)
+		fireGlobals = jQuery.event && s.global;
+
+		// Watch for a new set of requests
+		if ( fireGlobals && jQuery.active++ === 0 ) {
+			jQuery.event.trigger( "ajaxStart" );
+		}
+
+		// Uppercase the type
+		s.type = s.type.toUpperCase();
+
+		// Determine if request has content
+		s.hasContent = !rnoContent.test( s.type );
+
+		// Save the URL in case we're toying with the If-Modified-Since
+		// and/or If-None-Match header later on
+		// Remove hash to simplify url manipulation
+		cacheURL = s.url.replace( rhash, "" );
+
+		// More options handling for requests with no content
+		if ( !s.hasContent ) {
+
+			// Remember the hash so we can put it back
+			uncached = s.url.slice( cacheURL.length );
+
+			// If data is available, append data to url
+			if ( s.data ) {
+				cacheURL += ( rquery.test( cacheURL ) ? "&" : "?" ) + s.data;
+
+				// #9682: remove data so that it's not used in an eventual retry
+				delete s.data;
+			}
+
+			// Add anti-cache in uncached url if needed
+			if ( s.cache === false ) {
+				cacheURL = cacheURL.replace( rts, "" );
+				uncached = ( rquery.test( cacheURL ) ? "&" : "?" ) + "_=" + ( nonce++ ) + uncached;
+			}
+
+			// Put hash and anti-cache on the URL that will be requested (gh-1732)
+			s.url = cacheURL + uncached;
+
+		// Change '%20' to '+' if this is encoded form body content (gh-2658)
+		} else if ( s.data && s.processData &&
+			( s.contentType || "" ).indexOf( "application/x-www-form-urlencoded" ) === 0 ) {
+			s.data = s.data.replace( r20, "+" );
+		}
+
+		// Set the If-Modified-Since and/or If-None-Match header, if in ifModified mode.
+		if ( s.ifModified ) {
+			if ( jQuery.lastModified[ cacheURL ] ) {
+				jqXHR.setRequestHeader( "If-Modified-Since", jQuery.lastModified[ cacheURL ] );
+			}
+			if ( jQuery.etag[ cacheURL ] ) {
+				jqXHR.setRequestHeader( "If-None-Match", jQuery.etag[ cacheURL ] );
+			}
+		}
+
+		// Set the correct header, if data is being sent
+		if ( s.data && s.hasContent && s.contentType !== false || options.contentType ) {
+			jqXHR.setRequestHeader( "Content-Type", s.contentType );
+		}
+
+		// Set the Accepts header for the server, depending on the dataType
+		jqXHR.setRequestHeader(
+			"Accept",
+			s.dataTypes[ 0 ] && s.accepts[ s.dataTypes[ 0 ] ] ?
+				s.accepts[ s.dataTypes[ 0 ] ] +
+					( s.dataTypes[ 0 ] !== "*" ? ", " + allTypes + "; q=0.01" : "" ) :
+				s.accepts[ "*" ]
+		);
+
+		// Check for headers option
+		for ( i in s.headers ) {
+			jqXHR.setRequestHeader( i, s.headers[ i ] );
+		}
+
+		// Allow custom headers/mimetypes and early abort
+		if ( s.beforeSend &&
+			( s.beforeSend.call( callbackContext, jqXHR, s ) === false || completed ) ) {
+
+			// Abort if not done already and return
+			return jqXHR.abort();
+		}
+
+		// Aborting is no longer a cancellation
+		strAbort = "abort";
+
+		// Install callbacks on deferreds
+		completeDeferred.add( s.complete );
+		jqXHR.done( s.success );
+		jqXHR.fail( s.error );
+
+		// Get transport
+		transport = inspectPrefiltersOrTransports( transports, s, options, jqXHR );
+
+		// If no transport, we auto-abort
+		if ( !transport ) {
+			done( -1, "No Transport" );
+		} else {
+			jqXHR.readyState = 1;
+
+			// Send global event
+			if ( fireGlobals ) {
+				globalEventContext.trigger( "ajaxSend", [ jqXHR, s ] );
+			}
+
+			// If request was aborted inside ajaxSend, stop there
+			if ( completed ) {
+				return jqXHR;
+			}
+
+			// Timeout
+			if ( s.async && s.timeout > 0 ) {
+				timeoutTimer = window.setTimeout( function() {
+					jqXHR.abort( "timeout" );
+				}, s.timeout );
+			}
+
+			try {
+				completed = false;
+				transport.send( requestHeaders, done );
+			} catch ( e ) {
+
+				// Rethrow post-completion exceptions
+				if ( completed ) {
+					throw e;
+				}
+
+				// Propagate others as results
+				done( -1, e );
+			}
+		}
+
+		// Callback for when everything is done
+		function done( status, nativeStatusText, responses, headers ) {
+			var isSuccess, success, error, response, modified,
+				statusText = nativeStatusText;
+
+			// Ignore repeat invocations
+			if ( completed ) {
+				return;
+			}
+
+			completed = true;
+
+			// Clear timeout if it exists
+			if ( timeoutTimer ) {
+				window.clearTimeout( timeoutTimer );
+			}
+
+			// Dereference transport for early garbage collection
+			// (no matter how long the jqXHR object will be used)
+			transport = undefined;
+
+			// Cache response headers
+			responseHeadersString = headers || "";
+
+			// Set readyState
+			jqXHR.readyState = status > 0 ? 4 : 0;
+
+			// Determine if successful
+			isSuccess = status >= 200 && status < 300 || status === 304;
+
+			// Get response data
+			if ( responses ) {
+				response = ajaxHandleResponses( s, jqXHR, responses );
+			}
+
+			// Convert no matter what (that way responseXXX fields are always set)
+			response = ajaxConvert( s, response, jqXHR, isSuccess );
+
+			// If successful, handle type chaining
+			if ( isSuccess ) {
+
+				// Set the If-Modified-Since and/or If-None-Match header, if in ifModified mode.
+				if ( s.ifModified ) {
+					modified = jqXHR.getResponseHeader( "Last-Modified" );
+					if ( modified ) {
+						jQuery.lastModified[ cacheURL ] = modified;
+					}
+					modified = jqXHR.getResponseHeader( "etag" );
+					if ( modified ) {
+						jQuery.etag[ cacheURL ] = modified;
+					}
+				}
+
+				// if no content
+				if ( status === 204 || s.type === "HEAD" ) {
+					statusText = "nocontent";
+
+				// if not modified
+				} else if ( status === 304 ) {
+					statusText = "notmodified";
+
+				// If we have data, let's convert it
+				} else {
+					statusText = response.state;
+					success = response.data;
+					error = response.error;
+					isSuccess = !error;
+				}
+			} else {
+
+				// Extract error from statusText and normalize for non-aborts
+				error = statusText;
+				if ( status || !statusText ) {
+					statusText = "error";
+					if ( status < 0 ) {
+						status = 0;
+					}
+				}
+			}
+
+			// Set data for the fake xhr object
+			jqXHR.status = status;
+			jqXHR.statusText = ( nativeStatusText || statusText ) + "";
+
+			// Success/Error
+			if ( isSuccess ) {
+				deferred.resolveWith( callbackContext, [ success, statusText, jqXHR ] );
+			} else {
+				deferred.rejectWith( callbackContext, [ jqXHR, statusText, error ] );
+			}
+
+			// Status-dependent callbacks
+			jqXHR.statusCode( statusCode );
+			statusCode = undefined;
+
+			if ( fireGlobals ) {
+				globalEventContext.trigger( isSuccess ? "ajaxSuccess" : "ajaxError",
+					[ jqXHR, s, isSuccess ? success : error ] );
+			}
+
+			// Complete
+			completeDeferred.fireWith( callbackContext, [ jqXHR, statusText ] );
+
+			if ( fireGlobals ) {
+				globalEventContext.trigger( "ajaxComplete", [ jqXHR, s ] );
+
+				// Handle the global AJAX counter
+				if ( !( --jQuery.active ) ) {
+					jQuery.event.trigger( "ajaxStop" );
+				}
+			}
+		}
+
+		return jqXHR;
+	},
+
+	getJSON: function( url, data, callback ) {
+		return jQuery.get( url, data, callback, "json" );
+	},
+
+	getScript: function( url, callback ) {
+		return jQuery.get( url, undefined, callback, "script" );
+	}
+} );
+
+jQuery.each( [ "get", "post" ], function( i, method ) {
+	jQuery[ method ] = function( url, data, callback, type ) {
+
+		// Shift arguments if data argument was omitted
+		if ( jQuery.isFunction( data ) ) {
+			type = type || callback;
+			callback = data;
+			data = undefined;
+		}
+
+		// The url can be an options object (which then must have .url)
+		return jQuery.ajax( jQuery.extend( {
+			url: url,
+			type: method,
+			dataType: type,
+			data: data,
+			success: callback
+		}, jQuery.isPlainObject( url ) && url ) );
+	};
+} );
+
+
+jQuery._evalUrl = function( url ) {
+	return jQuery.ajax( {
+		url: url,
+
+		// Make this explicit, since user can override this through ajaxSetup (#11264)
+		type: "GET",
+		dataType: "script",
+		cache: true,
+		async: false,
+		global: false,
+		"throws": true
+	} );
+};
+
+
+jQuery.fn.extend( {
+	wrapAll: function( html ) {
+		var wrap;
+
+		if ( this[ 0 ] ) {
+			if ( jQuery.isFunction( html ) ) {
+				html = html.call( this[ 0 ] );
+			}
+
+			// The elements to wrap the target around
+			wrap = jQuery( html, this[ 0 ].ownerDocument ).eq( 0 ).clone( true );
+
+			if ( this[ 0 ].parentNode ) {
+				wrap.insertBefore( this[ 0 ] );
+			}
+
+			wrap.map( function() {
+				var elem = this;
+
+				while ( elem.firstElementChild ) {
+					elem = elem.firstElementChild;
+				}
+
+				return elem;
+			} ).append( this );
+		}
+
+		return this;
+	},
+
+	wrapInner: function( html ) {
+		if ( jQuery.isFunction( html ) ) {
+			return this.each( function( i ) {
+				jQuery( this ).wrapInner( html.call( this, i ) );
+			} );
+		}
+
+		return this.each( function() {
+			var self = jQuery( this ),
+				contents = self.contents();
+
+			if ( contents.length ) {
+				contents.wrapAll( html );
+
+			} else {
+				self.append( html );
+			}
+		} );
+	},
+
+	wrap: function( html ) {
+		var isFunction = jQuery.isFunction( html );
+
+		return this.each( function( i ) {
+			jQuery( this ).wrapAll( isFunction ? html.call( this, i ) : html );
+		} );
+	},
+
+	unwrap: function( selector ) {
+		this.parent( selector ).not( "body" ).each( function() {
+			jQuery( this ).replaceWith( this.childNodes );
+		} );
+		return this;
+	}
+} );
+
+
+jQuery.expr.pseudos.hidden = function( elem ) {
+	return !jQuery.expr.pseudos.visible( elem );
+};
+jQuery.expr.pseudos.visible = function( elem ) {
+	return !!( elem.offsetWidth || elem.offsetHeight || elem.getClientRects().length );
+};
+
+
+
+
+jQuery.ajaxSettings.xhr = function() {
+	try {
+		return new window.XMLHttpRequest();
+	} catch ( e ) {}
+};
+
+var xhrSuccessStatus = {
+
+		// File protocol always yields status code 0, assume 200
+		0: 200,
+
+		// Support: IE <=9 only
+		// #1450: sometimes IE returns 1223 when it should be 204
+		1223: 204
+	},
+	xhrSupported = jQuery.ajaxSettings.xhr();
+
+support.cors = !!xhrSupported && ( "withCredentials" in xhrSupported );
+support.ajax = xhrSupported = !!xhrSupported;
+
+jQuery.ajaxTransport( function( options ) {
+	var callback, errorCallback;
+
+	// Cross domain only allowed if supported through XMLHttpRequest
+	if ( support.cors || xhrSupported && !options.crossDomain ) {
+		return {
+			send: function( headers, complete ) {
+				var i,
+					xhr = options.xhr();
+
+				xhr.open(
+					options.type,
+					options.url,
+					options.async,
+					options.username,
+					options.password
+				);
+
+				// Apply custom fields if provided
+				if ( options.xhrFields ) {
+					for ( i in options.xhrFields ) {
+						xhr[ i ] = options.xhrFields[ i ];
+					}
+				}
+
+				// Override mime type if needed
+				if ( options.mimeType && xhr.overrideMimeType ) {
+					xhr.overrideMimeType( options.mimeType );
+				}
+
+				// X-Requested-With header
+				// For cross-domain requests, seeing as conditions for a preflight are
+				// akin to a jigsaw puzzle, we simply never set it to be sure.
+				// (it can always be set on a per-request basis or even using ajaxSetup)
+				// For same-domain requests, won't change header if already provided.
+				if ( !options.crossDomain && !headers[ "X-Requested-With" ] ) {
+					headers[ "X-Requested-With" ] = "XMLHttpRequest";
+				}
+
+				// Set headers
+				for ( i in headers ) {
+					xhr.setRequestHeader( i, headers[ i ] );
+				}
+
+				// Callback
+				callback = function( type ) {
+					return function() {
+						if ( callback ) {
+							callback = errorCallback = xhr.onload =
+								xhr.onerror = xhr.onabort = xhr.onreadystatechange = null;
+
+							if ( type === "abort" ) {
+								xhr.abort();
+							} else if ( type === "error" ) {
+
+								// Support: IE <=9 only
+								// On a manual native abort, IE9 throws
+								// errors on any property access that is not readyState
+								if ( typeof xhr.status !== "number" ) {
+									complete( 0, "error" );
+								} else {
+									complete(
+
+										// File: protocol always yields status 0; see #8605, #14207
+										xhr.status,
+										xhr.statusText
+									);
+								}
+							} else {
+								complete(
+									xhrSuccessStatus[ xhr.status ] || xhr.status,
+									xhr.statusText,
+
+									// Support: IE <=9 only
+									// IE9 has no XHR2 but throws on binary (trac-11426)
+									// For XHR2 non-text, let the caller handle it (gh-2498)
+									( xhr.responseType || "text" ) !== "text"  ||
+									typeof xhr.responseText !== "string" ?
+										{ binary: xhr.response } :
+										{ text: xhr.responseText },
+									xhr.getAllResponseHeaders()
+								);
+							}
+						}
+					};
+				};
+
+				// Listen to events
+				xhr.onload = callback();
+				errorCallback = xhr.onerror = callback( "error" );
+
+				// Support: IE 9 only
+				// Use onreadystatechange to replace onabort
+				// to handle uncaught aborts
+				if ( xhr.onabort !== undefined ) {
+					xhr.onabort = errorCallback;
+				} else {
+					xhr.onreadystatechange = function() {
+
+						// Check readyState before timeout as it changes
+						if ( xhr.readyState === 4 ) {
+
+							// Allow onerror to be called first,
+							// but that will not handle a native abort
+							// Also, save errorCallback to a variable
+							// as xhr.onerror cannot be accessed
+							window.setTimeout( function() {
+								if ( callback ) {
+									errorCallback();
+								}
+							} );
+						}
+					};
+				}
+
+				// Create the abort callback
+				callback = callback( "abort" );
+
+				try {
+
+					// Do send the request (this may raise an exception)
+					xhr.send( options.hasContent && options.data || null );
+				} catch ( e ) {
+
+					// #14683: Only rethrow if this hasn't been notified as an error yet
+					if ( callback ) {
+						throw e;
+					}
+				}
+			},
+
+			abort: function() {
+				if ( callback ) {
+					callback();
+				}
+			}
+		};
+	}
+} );
+
+
+
+
+// Prevent auto-execution of scripts when no explicit dataType was provided (See gh-2432)
+jQuery.ajaxPrefilter( function( s ) {
+	if ( s.crossDomain ) {
+		s.contents.script = false;
+	}
+} );
+
+// Install script dataType
+jQuery.ajaxSetup( {
+	accepts: {
+		script: "text/javascript, application/javascript, " +
+			"application/ecmascript, application/x-ecmascript"
+	},
+	contents: {
+		script: /\b(?:java|ecma)script\b/
+	},
+	converters: {
+		"text script": function( text ) {
+			jQuery.globalEval( text );
+			return text;
+		}
+	}
+} );
+
+// Handle cache's special case and crossDomain
+jQuery.ajaxPrefilter( "script", function( s ) {
+	if ( s.cache === undefined ) {
+		s.cache = false;
+	}
+	if ( s.crossDomain ) {
+		s.type = "GET";
+	}
+} );
+
+// Bind script tag hack transport
+jQuery.ajaxTransport( "script", function( s ) {
+
+	// This transport only deals with cross domain requests
+	if ( s.crossDomain ) {
+		var script, callback;
+		return {
+			send: function( _, complete ) {
+				script = jQuery( "<script>" ).prop( {
+					charset: s.scriptCharset,
+					src: s.url
+				} ).on(
+					"load error",
+					callback = function( evt ) {
+						script.remove();
+						callback = null;
+						if ( evt ) {
+							complete( evt.type === "error" ? 404 : 200, evt.type );
+						}
+					}
+				);
+
+				// Use native DOM manipulation to avoid our domManip AJAX trickery
+				document.head.appendChild( script[ 0 ] );
+			},
+			abort: function() {
+				if ( callback ) {
+					callback();
+				}
+			}
+		};
+	}
+} );
+
+
+
+
+var oldCallbacks = [],
+	rjsonp = /(=)\?(?=&|$)|\?\?/;
+
+// Default jsonp settings
+jQuery.ajaxSetup( {
+	jsonp: "callback",
+	jsonpCallback: function() {
+		var callback = oldCallbacks.pop() || ( jQuery.expando + "_" + ( nonce++ ) );
+		this[ callback ] = true;
+		return callback;
+	}
+} );
+
+// Detect, normalize options and install callbacks for jsonp requests
+jQuery.ajaxPrefilter( "json jsonp", function( s, originalSettings, jqXHR ) {
+
+	var callbackName, overwritten, responseContainer,
+		jsonProp = s.jsonp !== false && ( rjsonp.test( s.url ) ?
+			"url" :
+			typeof s.data === "string" &&
+				( s.contentType || "" )
+					.indexOf( "application/x-www-form-urlencoded" ) === 0 &&
+				rjsonp.test( s.data ) && "data"
+		);
+
+	// Handle iff the expected data type is "jsonp" or we have a parameter to set
+	if ( jsonProp || s.dataTypes[ 0 ] === "jsonp" ) {
+
+		// Get callback name, remembering preexisting value associated with it
+		callbackName = s.jsonpCallback = jQuery.isFunction( s.jsonpCallback ) ?
+			s.jsonpCallback() :
+			s.jsonpCallback;
+
+		// Insert callback into url or form data
+		if ( jsonProp ) {
+			s[ jsonProp ] = s[ jsonProp ].replace( rjsonp, "$1" + callbackName );
+		} else if ( s.jsonp !== false ) {
+			s.url += ( rquery.test( s.url ) ? "&" : "?" ) + s.jsonp + "=" + callbackName;
+		}
+
+		// Use data converter to retrieve json after script execution
+		s.converters[ "script json" ] = function() {
+			if ( !responseContainer ) {
+				jQuery.error( callbackName + " was not called" );
+			}
+			return responseContainer[ 0 ];
+		};
+
+		// Force json dataType
+		s.dataTypes[ 0 ] = "json";
+
+		// Install callback
+		overwritten = window[ callbackName ];
+		window[ callbackName ] = function() {
+			responseContainer = arguments;
+		};
+
+		// Clean-up function (fires after converters)
+		jqXHR.always( function() {
+
+			// If previous value didn't exist - remove it
+			if ( overwritten === undefined ) {
+				jQuery( window ).removeProp( callbackName );
+
+			// Otherwise restore preexisting value
+			} else {
+				window[ callbackName ] = overwritten;
+			}
+
+			// Save back as free
+			if ( s[ callbackName ] ) {
+
+				// Make sure that re-using the options doesn't screw things around
+				s.jsonpCallback = originalSettings.jsonpCallback;
+
+				// Save the callback name for future use
+				oldCallbacks.push( callbackName );
+			}
+
+			// Call if it was a function and we have a response
+			if ( responseContainer && jQuery.isFunction( overwritten ) ) {
+				overwritten( responseContainer[ 0 ] );
+			}
+
+			responseContainer = overwritten = undefined;
+		} );
+
+		// Delegate to script
+		return "script";
+	}
+} );
+
+
+
+
+// Support: Safari 8 only
+// In Safari 8 documents created via document.implementation.createHTMLDocument
+// collapse sibling forms: the second one becomes a child of the first one.
+// Because of that, this security measure has to be disabled in Safari 8.
+// https://bugs.webkit.org/show_bug.cgi?id=137337
+support.createHTMLDocument = ( function() {
+	var body = document.implementation.createHTMLDocument( "" ).body;
+	body.innerHTML = "<form></form><form></form>";
+	return body.childNodes.length === 2;
+} )();
+
+
+// Argument "data" should be string of html
+// context (optional): If specified, the fragment will be created in this context,
+// defaults to document
+// keepScripts (optional): If true, will include scripts passed in the html string
+jQuery.parseHTML = function( data, context, keepScripts ) {
+	if ( typeof data !== "string" ) {
+		return [];
+	}
+	if ( typeof context === "boolean" ) {
+		keepScripts = context;
+		context = false;
+	}
+
+	var base, parsed, scripts;
+
+	if ( !context ) {
+
+		// Stop scripts or inline event handlers from being executed immediately
+		// by using document.implementation
+		if ( support.createHTMLDocument ) {
+			context = document.implementation.createHTMLDocument( "" );
+
+			// Set the base href for the created document
+			// so any parsed elements with URLs
+			// are based on the document's URL (gh-2965)
+			base = context.createElement( "base" );
+			base.href = document.location.href;
+			context.head.appendChild( base );
+		} else {
+			context = document;
+		}
+	}
+
+	parsed = rsingleTag.exec( data );
+	scripts = !keepScripts && [];
+
+	// Single tag
+	if ( parsed ) {
+		return [ context.createElement( parsed[ 1 ] ) ];
+	}
+
+	parsed = buildFragment( [ data ], context, scripts );
+
+	if ( scripts && scripts.length ) {
+		jQuery( scripts ).remove();
+	}
+
+	return jQuery.merge( [], parsed.childNodes );
+};
+
+
+/**
+ * Load a url into a page
+ */
+jQuery.fn.load = function( url, params, callback ) {
+	var selector, type, response,
+		self = this,
+		off = url.indexOf( " " );
+
+	if ( off > -1 ) {
+		selector = jQuery.trim( url.slice( off ) );
+		url = url.slice( 0, off );
+	}
+
+	// If it's a function
+	if ( jQuery.isFunction( params ) ) {
+
+		// We assume that it's the callback
+		callback = params;
+		params = undefined;
+
+	// Otherwise, build a param string
+	} else if ( params && typeof params === "object" ) {
+		type = "POST";
+	}
+
+	// If we have elements to modify, make the request
+	if ( self.length > 0 ) {
+		jQuery.ajax( {
+			url: url,
+
+			// If "type" variable is undefined, then "GET" method will be used.
+			// Make value of this field explicit since
+			// user can override it through ajaxSetup method
+			type: type || "GET",
+			dataType: "html",
+			data: params
+		} ).done( function( responseText ) {
+
+			// Save response for use in complete callback
+			response = arguments;
+
+			self.html( selector ?
+
+				// If a selector was specified, locate the right elements in a dummy div
+				// Exclude scripts to avoid IE 'Permission Denied' errors
+				jQuery( "<div>" ).append( jQuery.parseHTML( responseText ) ).find( selector ) :
+
+				// Otherwise use the full result
+				responseText );
+
+		// If the request succeeds, this function gets "data", "status", "jqXHR"
+		// but they are ignored because response was set above.
+		// If it fails, this function gets "jqXHR", "status", "error"
+		} ).always( callback && function( jqXHR, status ) {
+			self.each( function() {
+				callback.apply( this, response || [ jqXHR.responseText, status, jqXHR ] );
+			} );
+		} );
+	}
+
+	return this;
+};
+
+
+
+
+// Attach a bunch of functions for handling common AJAX events
+jQuery.each( [
+	"ajaxStart",
+	"ajaxStop",
+	"ajaxComplete",
+	"ajaxError",
+	"ajaxSuccess",
+	"ajaxSend"
+], function( i, type ) {
+	jQuery.fn[ type ] = function( fn ) {
+		return this.on( type, fn );
+	};
+} );
+
+
+
+
+jQuery.expr.pseudos.animated = function( elem ) {
+	return jQuery.grep( jQuery.timers, function( fn ) {
+		return elem === fn.elem;
+	} ).length;
+};
+
+
+
+
+/**
+ * Gets a window from an element
+ */
+function getWindow( elem ) {
+	return jQuery.isWindow( elem ) ? elem : elem.nodeType === 9 && elem.defaultView;
+}
+
+jQuery.offset = {
+	setOffset: function( elem, options, i ) {
+		var curPosition, curLeft, curCSSTop, curTop, curOffset, curCSSLeft, calculatePosition,
+			position = jQuery.css( elem, "position" ),
+			curElem = jQuery( elem ),
+			props = {};
+
+		// Set position first, in-case top/left are set even on static elem
+		if ( position === "static" ) {
+			elem.style.position = "relative";
+		}
+
+		curOffset = curElem.offset();
+		curCSSTop = jQuery.css( elem, "top" );
+		curCSSLeft = jQuery.css( elem, "left" );
+		calculatePosition = ( position === "absolute" || position === "fixed" ) &&
+			( curCSSTop + curCSSLeft ).indexOf( "auto" ) > -1;
+
+		// Need to be able to calculate position if either
+		// top or left is auto and position is either absolute or fixed
+		if ( calculatePosition ) {
+			curPosition = curElem.position();
+			curTop = curPosition.top;
+			curLeft = curPosition.left;
+
+		} else {
+			curTop = parseFloat( curCSSTop ) || 0;
+			curLeft = parseFloat( curCSSLeft ) || 0;
+		}
+
+		if ( jQuery.isFunction( options ) ) {
+
+			// Use jQuery.extend here to allow modification of coordinates argument (gh-1848)
+			options = options.call( elem, i, jQuery.extend( {}, curOffset ) );
+		}
+
+		if ( options.top != null ) {
+			props.top = ( options.top - curOffset.top ) + curTop;
+		}
+		if ( options.left != null ) {
+			props.left = ( options.left - curOffset.left ) + curLeft;
+		}
+
+		if ( "using" in options ) {
+			options.using.call( elem, props );
+
+		} else {
+			curElem.css( props );
+		}
+	}
+};
+
+jQuery.fn.extend( {
+	offset: function( options ) {
+
+		// Preserve chaining for setter
+		if ( arguments.length ) {
+			return options === undefined ?
+				this :
+				this.each( function( i ) {
+					jQuery.offset.setOffset( this, options, i );
+				} );
+		}
+
+		var docElem, win, rect, doc,
+			elem = this[ 0 ];
+
+		if ( !elem ) {
+			return;
+		}
+
+		// Support: IE <=11 only
+		// Running getBoundingClientRect on a
+		// disconnected node in IE throws an error
+		if ( !elem.getClientRects().length ) {
+			return { top: 0, left: 0 };
+		}
+
+		rect = elem.getBoundingClientRect();
+
+		// Make sure element is not hidden (display: none)
+		if ( rect.width || rect.height ) {
+			doc = elem.ownerDocument;
+			win = getWindow( doc );
+			docElem = doc.documentElement;
+
+			return {
+				top: rect.top + win.pageYOffset - docElem.clientTop,
+				left: rect.left + win.pageXOffset - docElem.clientLeft
+			};
+		}
+
+		// Return zeros for disconnected and hidden elements (gh-2310)
+		return rect;
+	},
+
+	position: function() {
+		if ( !this[ 0 ] ) {
+			return;
+		}
+
+		var offsetParent, offset,
+			elem = this[ 0 ],
+			parentOffset = { top: 0, left: 0 };
+
+		// Fixed elements are offset from window (parentOffset = {top:0, left: 0},
+		// because it is its only offset parent
+		if ( jQuery.css( elem, "position" ) === "fixed" ) {
+
+			// Assume getBoundingClientRect is there when computed position is fixed
+			offset = elem.getBoundingClientRect();
+
+		} else {
+
+			// Get *real* offsetParent
+			offsetParent = this.offsetParent();
+
+			// Get correct offsets
+			offset = this.offset();
+			if ( !jQuery.nodeName( offsetParent[ 0 ], "html" ) ) {
+				parentOffset = offsetParent.offset();
+			}
+
+			// Add offsetParent borders
+			parentOffset = {
+				top: parentOffset.top + jQuery.css( offsetParent[ 0 ], "borderTopWidth", true ),
+				left: parentOffset.left + jQuery.css( offsetParent[ 0 ], "borderLeftWidth", true )
+			};
+		}
+
+		// Subtract parent offsets and element margins
+		return {
+			top: offset.top - parentOffset.top - jQuery.css( elem, "marginTop", true ),
+			left: offset.left - parentOffset.left - jQuery.css( elem, "marginLeft", true )
+		};
+	},
+
+	// This method will return documentElement in the following cases:
+	// 1) For the element inside the iframe without offsetParent, this method will return
+	//    documentElement of the parent window
+	// 2) For the hidden or detached element
+	// 3) For body or html element, i.e. in case of the html node - it will return itself
+	//
+	// but those exceptions were never presented as a real life use-cases
+	// and might be considered as more preferable results.
+	//
+	// This logic, however, is not guaranteed and can change at any point in the future
+	offsetParent: function() {
+		return this.map( function() {
+			var offsetParent = this.offsetParent;
+
+			while ( offsetParent && jQuery.css( offsetParent, "position" ) === "static" ) {
+				offsetParent = offsetParent.offsetParent;
+			}
+
+			return offsetParent || documentElement;
+		} );
+	}
+} );
+
+// Create scrollLeft and scrollTop methods
+jQuery.each( { scrollLeft: "pageXOffset", scrollTop: "pageYOffset" }, function( method, prop ) {
+	var top = "pageYOffset" === prop;
+
+	jQuery.fn[ method ] = function( val ) {
+		return access( this, function( elem, method, val ) {
+			var win = getWindow( elem );
+
+			if ( val === undefined ) {
+				return win ? win[ prop ] : elem[ method ];
+			}
+
+			if ( win ) {
+				win.scrollTo(
+					!top ? val : win.pageXOffset,
+					top ? val : win.pageYOffset
+				);
+
+			} else {
+				elem[ method ] = val;
+			}
+		}, method, val, arguments.length );
+	};
+} );
+
+// Support: Safari <=7 - 9.1, Chrome <=37 - 49
+// Add the top/left cssHooks using jQuery.fn.position
+// Webkit bug: https://bugs.webkit.org/show_bug.cgi?id=29084
+// Blink bug: https://bugs.chromium.org/p/chromium/issues/detail?id=589347
+// getComputedStyle returns percent when specified for top/left/bottom/right;
+// rather than make the css module depend on the offset module, just check for it here
+jQuery.each( [ "top", "left" ], function( i, prop ) {
+	jQuery.cssHooks[ prop ] = addGetHookIf( support.pixelPosition,
+		function( elem, computed ) {
+			if ( computed ) {
+				computed = curCSS( elem, prop );
+
+				// If curCSS returns percentage, fallback to offset
+				return rnumnonpx.test( computed ) ?
+					jQuery( elem ).position()[ prop ] + "px" :
+					computed;
+			}
+		}
+	);
+} );
+
+
+// Create innerHeight, innerWidth, height, width, outerHeight and outerWidth methods
+jQuery.each( { Height: "height", Width: "width" }, function( name, type ) {
+	jQuery.each( { padding: "inner" + name, content: type, "": "outer" + name },
+		function( defaultExtra, funcName ) {
+
+		// Margin is only for outerHeight, outerWidth
+		jQuery.fn[ funcName ] = function( margin, value ) {
+			var chainable = arguments.length && ( defaultExtra || typeof margin !== "boolean" ),
+				extra = defaultExtra || ( margin === true || value === true ? "margin" : "border" );
+
+			return access( this, function( elem, type, value ) {
+				var doc;
+
+				if ( jQuery.isWindow( elem ) ) {
+
+					// $( window ).outerWidth/Height return w/h including scrollbars (gh-1729)
+					return funcName.indexOf( "outer" ) === 0 ?
+						elem[ "inner" + name ] :
+						elem.document.documentElement[ "client" + name ];
+				}
+
+				// Get document width or height
+				if ( elem.nodeType === 9 ) {
+					doc = elem.documentElement;
+
+					// Either scroll[Width/Height] or offset[Width/Height] or client[Width/Height],
+					// whichever is greatest
+					return Math.max(
+						elem.body[ "scroll" + name ], doc[ "scroll" + name ],
+						elem.body[ "offset" + name ], doc[ "offset" + name ],
+						doc[ "client" + name ]
+					);
+				}
+
+				return value === undefined ?
+
+					// Get width or height on the element, requesting but not forcing parseFloat
+					jQuery.css( elem, type, extra ) :
+
+					// Set width or height on the element
+					jQuery.style( elem, type, value, extra );
+			}, type, chainable ? margin : undefined, chainable );
+		};
+	} );
+} );
+
+
+jQuery.fn.extend( {
+
+	bind: function( types, data, fn ) {
+		return this.on( types, null, data, fn );
+	},
+	unbind: function( types, fn ) {
+		return this.off( types, null, fn );
+	},
+
+	delegate: function( selector, types, data, fn ) {
+		return this.on( types, selector, data, fn );
+	},
+	undelegate: function( selector, types, fn ) {
+
+		// ( namespace ) or ( selector, types [, fn] )
+		return arguments.length === 1 ?
+			this.off( selector, "**" ) :
+			this.off( types, selector || "**", fn );
+	}
+} );
+
+jQuery.parseJSON = JSON.parse;
+
+
+
+
+// Register as a named AMD module, since jQuery can be concatenated with other
+// files that may use define, but not via a proper concatenation script that
+// understands anonymous AMD modules. A named AMD is safest and most robust
+// way to register. Lowercase jquery is used because AMD module names are
+// derived from file names, and jQuery is normally delivered in a lowercase
+// file name. Do this after creating the global so that if an AMD module wants
+// to call noConflict to hide this version of jQuery, it will work.
+
+// Note that for maximum portability, libraries that are not jQuery should
+// declare themselves as anonymous modules, and avoid setting a global if an
+// AMD loader is present. jQuery is a special case. For more information, see
+// https://github.com/jrburke/requirejs/wiki/Updating-existing-libraries#wiki-anon
+
+if ( typeof define === "function" && define.amd ) {
+	define( "jquery", [], function() {
+		return jQuery;
+	} );
+}
+
+
+
+
+
+var
+
+	// Map over jQuery in case of overwrite
+	_jQuery = window.jQuery,
+
+	// Map over the $ in case of overwrite
+	_$ = window.$;
+
+jQuery.noConflict = function( deep ) {
+	if ( window.$ === jQuery ) {
+		window.$ = _$;
+	}
+
+	if ( deep && window.jQuery === jQuery ) {
+		window.jQuery = _jQuery;
+	}
+
+	return jQuery;
+};
+
+// Expose jQuery and $ identifiers, even in AMD
+// (#7102#comment:10, https://github.com/jquery/jquery/pull/557)
+// and CommonJS for browser emulators (#13566)
+if ( !noGlobal ) {
+	window.jQuery = window.$ = jQuery;
+}
+
+
+return jQuery;
+} );
+
+},{}],37:[function(require,module,exports){
 module.exports={
 	"version": "2016d",
 	"zones": [
@@ -47714,11 +60814,11 @@ module.exports={
 		"Pacific/Pohnpei|Pacific/Ponape"
 	]
 }
-},{}],32:[function(require,module,exports){
+},{}],38:[function(require,module,exports){
 var moment = module.exports = require("./moment-timezone");
 moment.tz.load(require('./data/packed/latest.json'));
 
-},{"./data/packed/latest.json":31,"./moment-timezone":33}],33:[function(require,module,exports){
+},{"./data/packed/latest.json":37,"./moment-timezone":39}],39:[function(require,module,exports){
 //! moment-timezone.js
 //! version : 0.5.4
 //! author : Tim Wood
@@ -48321,7 +61421,7 @@ moment.tz.load(require('./data/packed/latest.json'));
 	return moment;
 }));
 
-},{"moment":34}],34:[function(require,module,exports){
+},{"moment":40}],40:[function(require,module,exports){
 //! moment.js
 //! version : 2.14.1
 //! authors : Tim Wood, Iskren Chernev, Moment.js contributors
@@ -52517,7 +65617,7 @@ moment.tz.load(require('./data/packed/latest.json'));
     return _moment;
 
 }));
-},{}],35:[function(require,module,exports){
+},{}],41:[function(require,module,exports){
 /* Protocol - protocol constants */
 
 /* Command code => mnemonic */
@@ -52571,7 +65671,7 @@ module.exports.WILL_QOS_SHIFT = 3;
 module.exports.WILL_FLAG_MASK = 0x04;
 module.exports.CLEAN_SESSION_MASK = 0x02;
 
-},{}],36:[function(require,module,exports){
+},{}],42:[function(require,module,exports){
 (function (Buffer){
 
 'use strict';
@@ -53189,14 +66289,14 @@ function byteLength(bufOrString) {
 module.exports = generate
 
 }).call(this,require("buffer").Buffer)
-},{"./constants":35,"buffer":13}],37:[function(require,module,exports){
+},{"./constants":41,"buffer":17}],43:[function(require,module,exports){
 
 'use strict';
 
 exports.parser          = require('./parser')
 exports.generate        = require('./generate')
 
-},{"./generate":36,"./parser":39}],38:[function(require,module,exports){
+},{"./generate":42,"./parser":45}],44:[function(require,module,exports){
 
 function Packet() {
   this.cmd = null
@@ -53210,7 +66310,7 @@ function Packet() {
 
 module.exports = Packet
 
-},{}],39:[function(require,module,exports){
+},{}],45:[function(require,module,exports){
 
 var bl        = require('bl')
   , inherits  = require('inherits')
@@ -53600,7 +66700,7 @@ Parser.prototype._parseNum = function() {
 
 module.exports = Parser
 
-},{"./constants":35,"./packet":38,"bl":6,"events":26,"inherits":28}],40:[function(require,module,exports){
+},{"./constants":41,"./packet":44,"bl":10,"events":31,"inherits":33}],46:[function(require,module,exports){
 (function (process,global){
 'use strict';
 /**
@@ -54503,7 +67603,7 @@ MqttClient.prototype._nextId = function () {
 module.exports = MqttClient;
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./store":45,"_process":55,"end-of-stream":46,"events":26,"inherits":28,"mqtt-packet":37,"readable-stream":52,"reinterval":60}],41:[function(require,module,exports){
+},{"./store":51,"_process":61,"end-of-stream":52,"events":31,"inherits":33,"mqtt-packet":43,"readable-stream":58,"reinterval":66}],47:[function(require,module,exports){
 (function (process){
 'use strict';
 var MqttClient = require('../client'),
@@ -54644,7 +67744,7 @@ module.exports.connect = connect;
 module.exports.MqttClient = MqttClient;
 
 }).call(this,require('_process'))
-},{"../client":40,"./tcp":42,"./tls":43,"./ws":44,"_process":55,"url":81,"xtend":89}],42:[function(require,module,exports){
+},{"../client":46,"./tcp":48,"./tls":49,"./ws":50,"_process":61,"url":87,"xtend":95}],48:[function(require,module,exports){
 'use strict';
 var net = require('net');
 
@@ -54665,7 +67765,7 @@ function buildBuilder (client, opts) {
 
 module.exports = buildBuilder;
 
-},{"net":11}],43:[function(require,module,exports){
+},{"net":15}],49:[function(require,module,exports){
 'use strict';
 var tls = require('tls');
 
@@ -54715,7 +67815,7 @@ function buildBuilder (mqttClient, opts) {
 
 module.exports = buildBuilder;
 
-},{"tls":11}],44:[function(require,module,exports){
+},{"tls":15}],50:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -54804,7 +67904,7 @@ if ('browser' !== process.title) {
 }
 
 }).call(this,require('_process'))
-},{"_process":55,"url":81,"websocket-stream":86}],45:[function(require,module,exports){
+},{"_process":61,"url":87,"websocket-stream":92}],51:[function(require,module,exports){
 (function (process){
 'use strict';
 var Readable = require('readable-stream').Readable,
@@ -54916,7 +68016,7 @@ Store.prototype.close = function (cb) {
 module.exports = Store;
 
 }).call(this,require('_process'))
-},{"_process":55,"readable-stream":52}],46:[function(require,module,exports){
+},{"_process":61,"readable-stream":58}],52:[function(require,module,exports){
 var once = require('once');
 
 var noop = function() {};
@@ -55000,9 +68100,9 @@ var eos = function(stream, opts, callback) {
 };
 
 module.exports = eos;
-},{"once":53}],47:[function(require,module,exports){
-arguments[4][8][0].apply(exports,arguments)
-},{"./_stream_readable":49,"./_stream_writable":51,"_process":55,"core-util-is":15,"dup":8,"inherits":28}],48:[function(require,module,exports){
+},{"once":59}],53:[function(require,module,exports){
+arguments[4][12][0].apply(exports,arguments)
+},{"./_stream_readable":55,"./_stream_writable":57,"_process":61,"core-util-is":20,"dup":12,"inherits":33}],54:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -55050,9 +68150,9 @@ PassThrough.prototype._transform = function(chunk, encoding, cb) {
   cb(null, chunk);
 };
 
-},{"./_stream_transform":50,"core-util-is":15,"inherits":28}],49:[function(require,module,exports){
-arguments[4][9][0].apply(exports,arguments)
-},{"_process":55,"buffer":13,"core-util-is":15,"dup":9,"events":26,"inherits":28,"isarray":30,"stream":61,"string_decoder/":73}],50:[function(require,module,exports){
+},{"./_stream_transform":56,"core-util-is":20,"inherits":33}],55:[function(require,module,exports){
+arguments[4][13][0].apply(exports,arguments)
+},{"_process":61,"buffer":17,"core-util-is":20,"dup":13,"events":31,"inherits":33,"isarray":35,"stream":67,"string_decoder/":79}],56:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -55264,9 +68364,9 @@ function done(stream, er) {
   return stream.push(null);
 }
 
-},{"./_stream_duplex":47,"core-util-is":15,"inherits":28}],51:[function(require,module,exports){
-arguments[4][10][0].apply(exports,arguments)
-},{"./_stream_duplex":47,"_process":55,"buffer":13,"core-util-is":15,"dup":10,"inherits":28,"stream":61}],52:[function(require,module,exports){
+},{"./_stream_duplex":53,"core-util-is":20,"inherits":33}],57:[function(require,module,exports){
+arguments[4][14][0].apply(exports,arguments)
+},{"./_stream_duplex":53,"_process":61,"buffer":17,"core-util-is":20,"dup":14,"inherits":33,"stream":67}],58:[function(require,module,exports){
 (function (process){
 var Stream = require('stream'); // hack to fix a circular dependency issue when used with browserify
 exports = module.exports = require('./lib/_stream_readable.js');
@@ -55281,7 +68381,7 @@ if (!process.browser && process.env.READABLE_STREAM === 'disable') {
 }
 
 }).call(this,require('_process'))
-},{"./lib/_stream_duplex.js":47,"./lib/_stream_passthrough.js":48,"./lib/_stream_readable.js":49,"./lib/_stream_transform.js":50,"./lib/_stream_writable.js":51,"_process":55,"stream":61}],53:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":53,"./lib/_stream_passthrough.js":54,"./lib/_stream_readable.js":55,"./lib/_stream_transform.js":56,"./lib/_stream_writable.js":57,"_process":61,"stream":67}],59:[function(require,module,exports){
 var wrappy = require('wrappy')
 module.exports = wrappy(once)
 
@@ -55304,7 +68404,7 @@ function once (fn) {
   return f
 }
 
-},{"wrappy":88}],54:[function(require,module,exports){
+},{"wrappy":94}],60:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -55351,7 +68451,7 @@ function nextTick(fn, arg1, arg2, arg3) {
 }
 
 }).call(this,require('_process'))
-},{"_process":55}],55:[function(require,module,exports){
+},{"_process":61}],61:[function(require,module,exports){
 // shim for using process in browser
 
 var process = module.exports = {};
@@ -55472,7 +68572,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],56:[function(require,module,exports){
+},{}],62:[function(require,module,exports){
 (function (global){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -56009,7 +69109,7 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],57:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -56095,7 +69195,7 @@ var isArray = Array.isArray || function (xs) {
   return Object.prototype.toString.call(xs) === '[object Array]';
 };
 
-},{}],58:[function(require,module,exports){
+},{}],64:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -56182,13 +69282,13 @@ var objectKeys = Object.keys || function (obj) {
   return res;
 };
 
-},{}],59:[function(require,module,exports){
+},{}],65:[function(require,module,exports){
 'use strict';
 
 exports.decode = exports.parse = require('./decode');
 exports.encode = exports.stringify = require('./encode');
 
-},{"./decode":57,"./encode":58}],60:[function(require,module,exports){
+},{"./decode":63,"./encode":64}],66:[function(require,module,exports){
 'use strict'
 
 function ReInterval (callback, interval, args) {
@@ -56247,7 +69347,7 @@ function reInterval () {
 
 module.exports = reInterval;
 
-},{}],61:[function(require,module,exports){
+},{}],67:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -56376,32 +69476,32 @@ Stream.prototype.pipe = function(dest, options) {
   return dest;
 };
 
-},{"events":26,"inherits":28,"readable-stream/duplex.js":63,"readable-stream/passthrough.js":69,"readable-stream/readable.js":70,"readable-stream/transform.js":71,"readable-stream/writable.js":72}],62:[function(require,module,exports){
-arguments[4][14][0].apply(exports,arguments)
-},{"dup":14}],63:[function(require,module,exports){
-arguments[4][7][0].apply(exports,arguments)
-},{"./lib/_stream_duplex.js":64,"dup":7}],64:[function(require,module,exports){
-arguments[4][20][0].apply(exports,arguments)
-},{"./_stream_readable":66,"./_stream_writable":68,"core-util-is":15,"dup":20,"inherits":28,"process-nextick-args":54}],65:[function(require,module,exports){
-arguments[4][21][0].apply(exports,arguments)
-},{"./_stream_transform":67,"core-util-is":15,"dup":21,"inherits":28}],66:[function(require,module,exports){
-arguments[4][22][0].apply(exports,arguments)
-},{"./_stream_duplex":64,"_process":55,"buffer":13,"buffer-shims":12,"core-util-is":15,"dup":22,"events":26,"inherits":28,"isarray":62,"process-nextick-args":54,"string_decoder/":73,"util":11}],67:[function(require,module,exports){
-arguments[4][23][0].apply(exports,arguments)
-},{"./_stream_duplex":64,"core-util-is":15,"dup":23,"inherits":28}],68:[function(require,module,exports){
-arguments[4][24][0].apply(exports,arguments)
-},{"./_stream_duplex":64,"_process":55,"buffer":13,"buffer-shims":12,"core-util-is":15,"dup":24,"events":26,"inherits":28,"process-nextick-args":54,"util-deprecate":83}],69:[function(require,module,exports){
+},{"events":31,"inherits":33,"readable-stream/duplex.js":69,"readable-stream/passthrough.js":75,"readable-stream/readable.js":76,"readable-stream/transform.js":77,"readable-stream/writable.js":78}],68:[function(require,module,exports){
+arguments[4][18][0].apply(exports,arguments)
+},{"dup":18}],69:[function(require,module,exports){
+arguments[4][11][0].apply(exports,arguments)
+},{"./lib/_stream_duplex.js":70,"dup":11}],70:[function(require,module,exports){
+arguments[4][25][0].apply(exports,arguments)
+},{"./_stream_readable":72,"./_stream_writable":74,"core-util-is":20,"dup":25,"inherits":33,"process-nextick-args":60}],71:[function(require,module,exports){
+arguments[4][26][0].apply(exports,arguments)
+},{"./_stream_transform":73,"core-util-is":20,"dup":26,"inherits":33}],72:[function(require,module,exports){
+arguments[4][27][0].apply(exports,arguments)
+},{"./_stream_duplex":70,"_process":61,"buffer":17,"buffer-shims":16,"core-util-is":20,"dup":27,"events":31,"inherits":33,"isarray":68,"process-nextick-args":60,"string_decoder/":79,"util":15}],73:[function(require,module,exports){
+arguments[4][28][0].apply(exports,arguments)
+},{"./_stream_duplex":70,"core-util-is":20,"dup":28,"inherits":33}],74:[function(require,module,exports){
+arguments[4][29][0].apply(exports,arguments)
+},{"./_stream_duplex":70,"_process":61,"buffer":17,"buffer-shims":16,"core-util-is":20,"dup":29,"events":31,"inherits":33,"process-nextick-args":60,"util-deprecate":89}],75:[function(require,module,exports){
 module.exports = require("./lib/_stream_passthrough.js")
 
-},{"./lib/_stream_passthrough.js":65}],70:[function(require,module,exports){
-arguments[4][25][0].apply(exports,arguments)
-},{"./lib/_stream_duplex.js":64,"./lib/_stream_passthrough.js":65,"./lib/_stream_readable.js":66,"./lib/_stream_transform.js":67,"./lib/_stream_writable.js":68,"_process":55,"dup":25}],71:[function(require,module,exports){
+},{"./lib/_stream_passthrough.js":71}],76:[function(require,module,exports){
+arguments[4][30][0].apply(exports,arguments)
+},{"./lib/_stream_duplex.js":70,"./lib/_stream_passthrough.js":71,"./lib/_stream_readable.js":72,"./lib/_stream_transform.js":73,"./lib/_stream_writable.js":74,"_process":61,"dup":30}],77:[function(require,module,exports){
 module.exports = require("./lib/_stream_transform.js")
 
-},{"./lib/_stream_transform.js":67}],72:[function(require,module,exports){
+},{"./lib/_stream_transform.js":73}],78:[function(require,module,exports){
 module.exports = require("./lib/_stream_writable.js")
 
-},{"./lib/_stream_writable.js":68}],73:[function(require,module,exports){
+},{"./lib/_stream_writable.js":74}],79:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -56624,11 +69724,11 @@ function base64DetectIncompleteChar(buffer) {
   this.charLength = this.charReceived ? 3 : 0;
 }
 
-},{"buffer":13}],74:[function(require,module,exports){
-arguments[4][14][0].apply(exports,arguments)
-},{"dup":14}],75:[function(require,module,exports){
-arguments[4][20][0].apply(exports,arguments)
-},{"./_stream_readable":76,"./_stream_writable":78,"core-util-is":15,"dup":20,"inherits":28,"process-nextick-args":54}],76:[function(require,module,exports){
+},{"buffer":17}],80:[function(require,module,exports){
+arguments[4][18][0].apply(exports,arguments)
+},{"dup":18}],81:[function(require,module,exports){
+arguments[4][25][0].apply(exports,arguments)
+},{"./_stream_readable":82,"./_stream_writable":84,"core-util-is":20,"dup":25,"inherits":33,"process-nextick-args":60}],82:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -57511,7 +70611,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this,require('_process'))
-},{"./_stream_duplex":75,"_process":55,"buffer":13,"core-util-is":15,"events":26,"inherits":28,"isarray":74,"process-nextick-args":54,"string_decoder/":73,"util":11}],77:[function(require,module,exports){
+},{"./_stream_duplex":81,"_process":61,"buffer":17,"core-util-is":20,"events":31,"inherits":33,"isarray":80,"process-nextick-args":60,"string_decoder/":79,"util":15}],83:[function(require,module,exports){
 // a transform stream is a readable/writable stream where you do
 // something with the data.  Sometimes it's called a "filter",
 // but that's not a great name for it, since that implies a thing where
@@ -57692,7 +70792,7 @@ function done(stream, er) {
 
   return stream.push(null);
 }
-},{"./_stream_duplex":75,"core-util-is":15,"inherits":28}],78:[function(require,module,exports){
+},{"./_stream_duplex":81,"core-util-is":20,"inherits":33}],84:[function(require,module,exports){
 (function (process){
 // A bit simpler than readable streams.
 // Implement an async ._write(chunk, encoding, cb), and it'll handle all
@@ -58211,9 +71311,9 @@ function CorkedRequest(state) {
   };
 }
 }).call(this,require('_process'))
-},{"./_stream_duplex":75,"_process":55,"buffer":13,"core-util-is":15,"events":26,"inherits":28,"process-nextick-args":54,"util-deprecate":83}],79:[function(require,module,exports){
-arguments[4][71][0].apply(exports,arguments)
-},{"./lib/_stream_transform.js":77,"dup":71}],80:[function(require,module,exports){
+},{"./_stream_duplex":81,"_process":61,"buffer":17,"core-util-is":20,"events":31,"inherits":33,"process-nextick-args":60,"util-deprecate":89}],85:[function(require,module,exports){
+arguments[4][77][0].apply(exports,arguments)
+},{"./lib/_stream_transform.js":83,"dup":77}],86:[function(require,module,exports){
 (function (process){
 var Transform = require('readable-stream/transform')
   , inherits  = require('util').inherits
@@ -58313,7 +71413,7 @@ module.exports.obj = through2(function (options, transform, flush) {
 })
 
 }).call(this,require('_process'))
-},{"_process":55,"readable-stream/transform":79,"util":85,"xtend":89}],81:[function(require,module,exports){
+},{"_process":61,"readable-stream/transform":85,"util":91,"xtend":95}],87:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -59047,7 +72147,7 @@ Url.prototype.parseHost = function() {
   if (host) this.hostname = host;
 };
 
-},{"./util":82,"punycode":56,"querystring":59}],82:[function(require,module,exports){
+},{"./util":88,"punycode":62,"querystring":65}],88:[function(require,module,exports){
 'use strict';
 
 module.exports = {
@@ -59065,7 +72165,7 @@ module.exports = {
   }
 };
 
-},{}],83:[function(require,module,exports){
+},{}],89:[function(require,module,exports){
 (function (global){
 
 /**
@@ -59136,14 +72236,14 @@ function config (name) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],84:[function(require,module,exports){
+},{}],90:[function(require,module,exports){
 module.exports = function isBuffer(arg) {
   return arg && typeof arg === 'object'
     && typeof arg.copy === 'function'
     && typeof arg.fill === 'function'
     && typeof arg.readUInt8 === 'function';
 }
-},{}],85:[function(require,module,exports){
+},{}],91:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -59733,7 +72833,7 @@ function hasOwnProperty(obj, prop) {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./support/isBuffer":84,"_process":55,"inherits":28}],86:[function(require,module,exports){
+},{"./support/isBuffer":90,"_process":61,"inherits":33}],92:[function(require,module,exports){
 (function (process,global,Buffer){
 var through = require('through2')
 var duplexify = require('duplexify')
@@ -59849,7 +72949,7 @@ function WebSocketStream(target, protocols, options) {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"_process":55,"buffer":13,"duplexify":17,"through2":80,"ws":87}],87:[function(require,module,exports){
+},{"_process":61,"buffer":17,"duplexify":22,"through2":86,"ws":93}],93:[function(require,module,exports){
 
 var ws = null
 
@@ -59863,7 +72963,7 @@ if (typeof WebSocket !== 'undefined') {
 
 module.exports = ws
 
-},{}],88:[function(require,module,exports){
+},{}],94:[function(require,module,exports){
 // Returns a wrapper function that returns a wrapped callback
 // The wrapper function should do some stuff, and return a
 // presumably different callback function.
@@ -59898,7 +72998,7 @@ function wrappy (fn, cb) {
   }
 }
 
-},{}],89:[function(require,module,exports){
+},{}],95:[function(require,module,exports){
 module.exports = extend
 
 var hasOwnProperty = Object.prototype.hasOwnProperty;
