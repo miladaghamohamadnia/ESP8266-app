@@ -2,13 +2,14 @@ var d3 = require('d3-browserify')
 var moment = require('moment');
 //-----------------------------------------------------------------------
 module.exports = function updateData(packet, graphData) {
+	// console.log("updateData loaded ...");
 	var date_ = new Date().addHours(-4);   
 	m = graphData.m;
 	w = graphData.w;
 	h = graphData.h;
 	data = graphData.data;
-	tag = graphData.tag;
-	// console.log(moment().format());
+	var tag = graphData.tag;
+	console.log(graphData);
 	data.time.push(date_);
 	data.time.shift();
 	data.value.push(parseInt(packet.payload));

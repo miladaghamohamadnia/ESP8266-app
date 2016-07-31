@@ -6,7 +6,8 @@ module.exports = function initData(graphData) {
 	m = graphData.m;
 	w = graphData.w;
 	h = graphData.h;
-	tag = graphData.tag;
+	var tag = graphData.tag;
+	console.log(tag);
 	times_ext = d3.extent(graphData.data.time, function(el) {
 		return el;
 	});
@@ -27,10 +28,10 @@ module.exports = function initData(graphData) {
 	    // return the Y coordinate where we want to plot this datapoint
 	    return yScale(d); 
 	})
-	console.log('D3_init:  ' + tag);
+
 	// Add an SVG element with the desired dimensions and margin.
 	graph = d3.selectAll(tag).append("svg:svg")
-	// .attr("class", "Graph")
+	.attr("class", "Graph")
 	.attr("width", w + m[1] + m[3])
 	.attr("height", h + m[0] + m[2])
 	.append("svg:g")
